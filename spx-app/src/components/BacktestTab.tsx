@@ -35,6 +35,10 @@ interface Params {
 function timeInRange(t: string, start: string, end: string): boolean {
   return t >= start && t <= end
 }
+function timeToMinutes(t: string): number {
+  const [h, m] = t.split(':').map(Number)
+  return h * 60 + m
+}
 
 function surfacePrice(chain: OptionRow[], strike: number, type: 'call' | 'put', priceShift: number, useAsk: boolean, entrySpot: number): number {
   const shifted = strike - priceShift
@@ -154,20 +158,24 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
     const baseSpot = session.pricePath[0].price
     let openTrade: { trade: BacktestTrade; legs: Leg[]; entryTick: number } | null = null
 
-    for (let tick = 0; tick < totalTicks; tick += params.scanInterval) {
+    let nextScanMin = -1
+    for (let tick = 0; tick < totalTicks; tick++) {
       const spot = session.pricePath[tick].price
+      const tickTime = session.pricePath[tick].time
+      const tickMin = timeToMinutes(tickTime)
 
-      if (!openTrade && timeInRange(session.pricePath[tick].time, params.sessionStart, params.sessionEnd)) {
+      if (!openTrade && tickMin >= nextScanMin && timeInRange(tickTime, params.sessionStart, params.sessionEnd)) {
         const pos = findBestCombo(session.openingChain, baseSpot, spot, params.maxCost, params.templateMove, params.minPnl, params.minDelta)
         if (pos) {
           const trade: BacktestTrade = {
             id: `${dates[di]}_${tick}`,
             date: dates[di], entryTick: tick, exitTick: tick,
-            entryTime: session.pricePath[tick].time, exitTime: '',
+            entryTime: tickTime, exitTime: '',
             legs: pos.legs, entryCost: pos.cost, exitValue: 0,
             pnl: 0, pnlPct: 0, exitReason: '', score: pos.score,
           }
           openTrade = { trade, legs: pos.legs, entryTick: tick }
+          nextScanMin = tickMin + params.scanInterval
         }
       }
 
@@ -306,7 +314,7 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
         {mode === 'range' ? (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <ParamInput label="Max Cost (pts)" value={params.maxCost} onChange={v => updateParam('maxCost', v)} min={5} max={200} step={5} />
-            <ParamInput label="Scan Interval" value={params.scanInterval} onChange={v => updateParam('scanInterval', v)} min={1} max={20} step={1} />
+            <ParamInput label="Scan Every (min)" value={params.scanInterval} onChange={v => updateParam('scanInterval', v)} min={1} max={30} step={1} />
             <ParamInput label="TP (pts)" value={params.tpPoints} onChange={v => updateParam('tpPoints', v)} min={0.5} max={10} step={0.5} />
             <ParamInput label="SL (pts)" value={params.slPoints} onChange={v => updateParam('slPoints', v)} min={0.5} max={10} step={0.5} />
             <ParamInput label="Template (pts)" value={params.templateMove} onChange={v => updateParam('templateMove', v)} min={5} max={20} step={2.5} />
@@ -326,7 +334,7 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
           <>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <ParamInput label="Max Cost (pts)" value={params.maxCost} onChange={v => updateParam('maxCost', v)} min={5} max={200} step={5} />
-              <ParamInput label="Scan Interval" value={params.scanInterval} onChange={v => updateParam('scanInterval', v)} min={1} max={20} step={1} />
+              <ParamInput label="Scan Every (min)" value={params.scanInterval} onChange={v => updateParam('scanInterval', v)} min={1} max={30} step={1} />
               <ParamInput label="TP (pts)" value={params.tpPoints} onChange={v => updateParam('tpPoints', v)} min={0.5} max={10} step={0.5} />
               <ParamInput label="SL (pts)" value={params.slPoints} onChange={v => updateParam('slPoints', v)} min={0.5} max={10} step={0.5} />
             </div>

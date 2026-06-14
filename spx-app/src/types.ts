@@ -17,6 +17,7 @@ export interface OptionRow {
   mid: number
   volume: number
   openInterest: number
+  conid?: number
 }
 
 export interface SessionData {

@@ -136,6 +136,7 @@ export async function getOptionChain() {
           mid: (bid + ask) / 2,
           volume: parseInt(snap['71']?.v) || 0,
           openInterest: 0,
+          conid: contract.conid,
         })
       }
     } catch { }

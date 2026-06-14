@@ -154,6 +154,15 @@ app.get('/api/live/spot', (req, res) => {
   res.json({ spot: liveData.spot, pricePath: liveData.pricePath, uptime: Date.now() - liveData.startTime })
 })
 
+app.get('/api/live/accounts', async (req, res) => {
+  try {
+    const accounts = await ibkr.getAccounts()
+    res.json(accounts)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.post('/api/live/order', express.json(), async (req, res) => {
   try {
     const { accountId, action, quantity, orderType, price, conid } = req.body
