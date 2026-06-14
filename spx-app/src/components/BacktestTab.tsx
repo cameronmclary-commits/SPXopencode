@@ -28,20 +28,33 @@ interface BacktestResult {
 
 interface Params {
   otmCount: number; maxCost: number; scanInterval: number; tpPoints: number; slPoints: number
-  templateMove: number; minPnl: number
+  templateMove: number; minPnl: number; minDelta: number
 }
 
 function surfacePrice(chain: OptionRow[], strike: number, type: 'call' | 'put', priceShift: number, useAsk: boolean, entrySpot: number): number {
-  const shifted = type === 'call' ? strike - priceShift : strike + priceShift
+  const shifted = strike - priceShift
   const same = chain.filter(r => r.type === type).sort((a, b) => a.strike - b.strike)
   const getPrice = (r: OptionRow) => useAsk ? r.ask : r.bid
-  if (same.length === 0) return Math.max(0, type === 'call' ? entrySpot + priceShift - strike : strike - (entrySpot + priceShift))
+  if (same.length === 0) return Math.max(0.01, type === 'call' ? entrySpot + priceShift - strike : strike - (entrySpot + priceShift))
   if (shifted <= same[0].strike) return Math.max(0.01, getPrice(same[0]))
   if (shifted >= same[same.length - 1].strike) return Math.max(0.01, getPrice(same[same.length - 1]))
   let lo = 0, hi = same.length - 1
   while (hi - lo > 1) { const m = Math.floor((lo + hi) / 2); if (same[m].strike < shifted) lo = m; else hi = m }
   const t = (shifted - same[lo].strike) / (same[hi].strike - same[lo].strike)
   return getPrice(same[lo]) + t * (getPrice(same[hi]) - getPrice(same[lo]))
+}
+
+function surfaceMid(chain: OptionRow[], strike: number, type: 'call' | 'put', priceShift: number, baseSpot: number): number {
+  const bid = surfacePrice(chain, strike, type, priceShift, false, baseSpot)
+  const ask = surfacePrice(chain, strike, type, priceShift, true, baseSpot)
+  return (bid + ask) / 2
+}
+
+function numericDelta(chain: OptionRow[], strike: number, type: 'call' | 'put', spot: number, baseSpot: number): number {
+  const ps = spot - baseSpot
+  const up = surfaceMid(chain, strike, type, ps + 1, baseSpot)
+  const dn = surfaceMid(chain, strike, type, ps - 1, baseSpot)
+  return (up - dn) / 2
 }
 
 function getConsecutiveGroups<T extends { strike: number }>(arr: T[], k: number): T[][] {
@@ -56,7 +69,7 @@ function getConsecutiveGroups<T extends { strike: number }>(arr: T[], k: number)
   return r
 }
 
-function evalCombo(itm: OptionRow, otms: OptionRow[], chain: OptionRow[], baseSpot: number, spot: number, maxCost: number, templateMove: number, minPnl: number): { legs: Leg[]; cost: number; score: number } | null {
+function evalCombo(itm: OptionRow, otms: OptionRow[], chain: OptionRow[], baseSpot: number, spot: number, maxCost: number, templateMove: number, minPnl: number, minDelta: number): { legs: Leg[]; cost: number; score: number } | null {
   const priceShift = spot - baseSpot
   const ask = (r: OptionRow) => surfacePrice(chain, r.strike, r.type, priceShift, true, baseSpot)
   const bid = (r: OptionRow, move: number) => surfacePrice(chain, r.strike, r.type, priceShift + move, false, baseSpot)
@@ -75,6 +88,11 @@ function evalCombo(itm: OptionRow, otms: OptionRow[], chain: OptionRow[], baseSp
         legs.push({ strike: r.strike, type: r.type, quantity: q, entryAsk: a, entryBid: bid(r, 0) })
       }
       if (cost > maxCost) return
+      if (minDelta > 0) {
+        for (const l of legs) {
+          if (Math.abs(numericDelta(chain, l.strike, l.type, spot, baseSpot)) < minDelta) return
+        }
+      }
       const pnLat = (move: number) => legs.reduce((s, l) => s + l.quantity * surfacePrice(chain, l.strike, l.type, priceShift + move, false, baseSpot), 0)
       const pnlPos = pnLat(templateMove) - cost
       const pnlNeg = pnLat(-templateMove) - cost
@@ -89,7 +107,7 @@ function evalCombo(itm: OptionRow, otms: OptionRow[], chain: OptionRow[], baseSp
   return best
 }
 
-function findBestCombo(chain: OptionRow[], baseSpot: number, spot: number, otmCount: number, maxCost: number, templateMove: number, minPnl: number): { legs: Leg[]; cost: number; score: number } | null {
+function findBestCombo(chain: OptionRow[], baseSpot: number, spot: number, otmCount: number, maxCost: number, templateMove: number, minPnl: number, minDelta: number): { legs: Leg[]; cost: number; score: number } | null {
   const range = spot * 0.007
   const calls = chain.filter(r => r.type === 'call' && r.strike > spot - range && r.strike < spot + range).sort((a, b) => a.strike - b.strike)
   const puts = chain.filter(r => r.type === 'put' && r.strike < spot + range && r.strike > spot - range).sort((a, b) => a.strike - b.strike)
@@ -99,7 +117,7 @@ function findBestCombo(chain: OptionRow[], baseSpot: number, spot: number, otmCo
   for (const itm of calls.filter(r => r.strike < spot)) {
     const otms = puts.filter(r => r.strike > spot)
     for (const g of getConsecutiveGroups(otms, otmCount)) {
-      const r = evalCombo(itm, g, chain, baseSpot, spot, maxCost, templateMove, minPnl)
+      const r = evalCombo(itm, g, chain, baseSpot, spot, maxCost, templateMove, minPnl, minDelta)
       if (r && (!best || r.score > best.score)) best = r
     }
   }
@@ -107,7 +125,7 @@ function findBestCombo(chain: OptionRow[], baseSpot: number, spot: number, otmCo
   for (const itm of puts.filter(r => r.strike > spot)) {
     const otms = calls.filter(r => r.strike < spot)
     for (const g of getConsecutiveGroups(otms, otmCount)) {
-      const r = evalCombo(itm, g, chain, baseSpot, spot, maxCost, templateMove, minPnl)
+      const r = evalCombo(itm, g, chain, baseSpot, spot, maxCost, templateMove, minPnl, minDelta)
       if (r && (!best || r.score > best.score)) best = r
     }
   }
@@ -128,16 +146,13 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
     const totalTicks = session.pricePath.length
     const baseSpot = session.pricePath[0].price
     let openTrade: { trade: BacktestTrade; legs: Leg[]; entryTick: number } | null = null
-    let sessionPnl = 0
-    let entered = false
 
     for (let tick = 0; tick < totalTicks; tick += params.scanInterval) {
       const spot = session.pricePath[tick].price
 
-      if (!openTrade && !entered) {
-        const pos = findBestCombo(session.openingChain, baseSpot, spot, params.otmCount, params.maxCost, params.templateMove, params.minPnl)
+      if (!openTrade) {
+        const pos = findBestCombo(session.openingChain, baseSpot, spot, params.otmCount, params.maxCost, params.templateMove, params.minPnl, params.minDelta)
         if (pos) {
-          entered = true
           const trade: BacktestTrade = {
             id: `${dates[di]}_${tick}`,
             date: dates[di], entryTick: tick, exitTick: tick,
@@ -160,14 +175,14 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
           trade.exitTick = tick; trade.exitTime = session.pricePath[tick].time
           trade.exitValue = currentVal; trade.pnl = pnl; trade.pnlPct = (pnl / trade.entryCost) * 100
           trade.exitReason = 'TP'
-          cumPnl += pnl; sessionPnl += pnl
+          cumPnl += pnl
           trades.push(trade); openTrade = null
           equityCurve.push({ tick: equityCurve.length, pnl: cumPnl })
         } else if (pnl <= -params.slPoints) {
           trade.exitTick = tick; trade.exitTime = session.pricePath[tick].time
           trade.exitValue = currentVal; trade.pnl = pnl; trade.pnlPct = (pnl / trade.entryCost) * 100
           trade.exitReason = 'SL'
-          cumPnl += pnl; sessionPnl += pnl
+          cumPnl += pnl
           trades.push(trade); openTrade = null
           equityCurve.push({ tick: equityCurve.length, pnl: cumPnl })
         }
@@ -183,7 +198,7 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
       trade.exitValue = finalVal; trade.pnl = finalVal - trade.entryCost
       trade.pnlPct = trade.entryCost > 0 ? (trade.pnl / trade.entryCost) * 100 : 0
       trade.exitReason = 'EOS'
-      cumPnl += trade.pnl; sessionPnl += trade.pnl
+      cumPnl += trade.pnl
       trades.push(trade); openTrade = null
       equityCurve.push({ tick: equityCurve.length, pnl: cumPnl })
     }
@@ -226,7 +241,7 @@ function computeMaxDrawdown(equity: number[]): number {
 
 export default function BacktestTab({ sessions }: { sessions: { date: string; id: string }[] }) {
   const [params, setParams] = useState<Params>({
-    otmCount: 2, maxCost: 50, scanInterval: 5, tpPoints: 1, slPoints: 2, templateMove: 10, minPnl: 0,
+    otmCount: 2, maxCost: 50, scanInterval: 5, tpPoints: 1, slPoints: 2, templateMove: 10, minPnl: 0, minDelta: 0,
   })
   const [mode, setMode] = useState<'range' | 'pick'>('range')
   const [yearStart, setYearStart] = useState(2024)
@@ -289,6 +304,7 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
             <ParamInput label="SL (pts)" value={params.slPoints} onChange={v => updateParam('slPoints', v)} min={0.5} max={10} step={0.5} />
             <ParamInput label="Template (pts)" value={params.templateMove} onChange={v => updateParam('templateMove', v)} min={5} max={20} step={2.5} />
             <ParamInput label="Min P&L (pts)" value={params.minPnl} onChange={v => updateParam('minPnl', v)} min={0} max={5} step={0.1} />
+            <ParamInput label="Min Delta" value={params.minDelta} onChange={v => updateParam('minDelta', v)} min={0} max={1} step={0.05} />
             <div className="flex items-center gap-2">
               <label className="text-xs text-ztextdim">Year:</label>
               <select value={yearStart} onChange={e => { setYearStart(Number(e.target.value)); setYearEnd(Number(e.target.value) + 1) }} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext">
@@ -309,6 +325,7 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
             <div className="flex flex-wrap gap-3 mt-2">
               <ParamInput label="Template (pts)" value={params.templateMove} onChange={v => updateParam('templateMove', v)} min={5} max={20} step={2.5} />
               <ParamInput label="Min P&L (pts)" value={params.minPnl} onChange={v => updateParam('minPnl', v)} min={0} max={5} step={0.1} />
+              <ParamInput label="Min Delta" value={params.minDelta} onChange={v => updateParam('minDelta', v)} min={0} max={1} step={0.05} />
             </div>
             <div className="mt-3 flex flex-wrap gap-2 items-center">
               <span className="text-xs text-ztextdim">Select dates ({selectedDates.size} of {sessions.length}):</span>

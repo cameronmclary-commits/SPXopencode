@@ -3,6 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { listSessions, loadDateParquet, warmCache } from './data-loader.js';
+import * as ibkr from './ibkr-client.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_DIR = path.resolve(__dirname, '..', 'spx-app', 'dist');
@@ -135,6 +136,63 @@ app.get('/api/chain/:date', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+let liveData = { chain: null, spot: 0, pricePath: [], startTime: Date.now() }
+let liveActive = false
+
+app.get('/api/live/status', async (req, res) => {
+  const status = await ibkr.isAvailable()
+  res.json({ ...status, active: liveActive, chainSize: liveData.chain?.chain?.length || 0, spot: liveData.spot })
+})
+
+app.get('/api/live/chain', (req, res) => {
+  if (!liveActive || !liveData.chain) return res.status(503).json({ error: 'Live feed not active' })
+  res.json(liveData.chain)
+})
+
+app.get('/api/live/spot', (req, res) => {
+  res.json({ spot: liveData.spot, pricePath: liveData.pricePath, uptime: Date.now() - liveData.startTime })
+})
+
+app.post('/api/live/order', express.json(), async (req, res) => {
+  try {
+    const { accountId, action, quantity, orderType, price, conid } = req.body
+    if (!accountId || !action || !quantity) {
+      return res.status(400).json({ error: 'Missing required fields: accountId, action, quantity' })
+    }
+    const result = await ibkr.placeOrder(accountId, { conid }, action, quantity, orderType, price)
+    res.json(result)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+async function startLiveFeed() {
+  const status = await ibkr.isAvailable()
+  if (!status.connected || !status.authenticated) return
+
+  liveActive = true
+  console.log('Live IBKR feed started')
+
+  ibkr.startLiveFeed(
+    (chain) => {
+      liveData.chain = chain
+      liveData.spot = chain.spotPrice
+      liveData.pricePath.push({ time: new Date().toISOString(), price: chain.spotPrice })
+      if (liveData.pricePath.length > 5000) liveData.pricePath = liveData.pricePath.slice(-5000)
+    },
+    (spot) => {
+      liveData.spot = spot
+      liveData.pricePath.push({ time: new Date().toISOString(), price: spot })
+      if (liveData.pricePath.length > 5000) liveData.pricePath = liveData.pricePath.slice(-5000)
+    },
+    (err) => console.error('Live feed error:', err),
+  )
+}
+
+if (process.env.IB_LIVE === 'true') {
+  startLiveFeed().catch(err => console.error('Failed to start live feed:', err))
+}
 
 let cacheProgress = { cached: 0, total: sessionList.length, ok: 0 };
 

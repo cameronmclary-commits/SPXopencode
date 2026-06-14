@@ -23,7 +23,7 @@ interface Position {
 }
 
 function chainSurfacePrice(chain: OptionRow[], strike: number, type: 'call' | 'put', priceShift: number, useAsk: boolean, entrySpot: number): number {
-  const shifted = type === 'call' ? strike - priceShift : strike + priceShift
+  const shifted = strike - priceShift
   const same = chain.filter(r => r.type === type).sort((a, b) => a.strike - b.strike)
   const getPrice = (r: OptionRow) => useAsk ? r.ask : r.bid
   if (same.length === 0) return Math.max(0.01, type === 'call' ? entrySpot + priceShift - strike : strike - (entrySpot + priceShift))
@@ -33,6 +33,19 @@ function chainSurfacePrice(chain: OptionRow[], strike: number, type: 'call' | 'p
   while (hi - lo > 1) { const m = Math.floor((lo + hi) / 2); if (same[m].strike < shifted) lo = m; else hi = m }
   const t = (shifted - same[lo].strike) / (same[hi].strike - same[lo].strike)
   return getPrice(same[lo]) + t * (getPrice(same[hi]) - getPrice(same[lo]))
+}
+
+function chainSurfaceMid(chain: OptionRow[], strike: number, type: 'call' | 'put', priceShift: number, baseSpot: number): number {
+  const bid = chainSurfacePrice(chain, strike, type, priceShift, false, baseSpot)
+  const ask = chainSurfacePrice(chain, strike, type, priceShift, true, baseSpot)
+  return (bid + ask) / 2
+}
+
+function numericDelta(chain: OptionRow[], strike: number, type: 'call' | 'put', spot: number, baseSpot: number): number {
+  const ps = spot - baseSpot
+  const up = chainSurfaceMid(chain, strike, type, ps + 1, baseSpot)
+  const dn = chainSurfaceMid(chain, strike, type, ps - 1, baseSpot)
+  return (up - dn) / 2
 }
 
 function getConsecutiveGroups<T extends { strike: number }>(arr: T[], k: number): T[][] {
@@ -54,6 +67,7 @@ function generateStructuredPosition(
   spot: number,
   templateMove: number,
   minPnl: number,
+  minDelta: number,
 ): Position | null {
   const nOtm = otmRows.length
   let bestCallLegs: Leg[] = []
@@ -78,6 +92,11 @@ function generateStructuredPosition(
         ;(r.type === 'call' ? callLegs : putLegs).push(leg)
       }
       const legs = [...callLegs, ...putLegs]
+      if (minDelta > 0) {
+        for (const l of legs) {
+          if (Math.abs(numericDelta(chain, l.strike, l.type, spot, spot)) < minDelta) return
+        }
+      }
       const pnlPos = pnLat(legs, templateMove) - cost
       const pnlNeg = pnLat(legs, -templateMove) - cost
       if (pnlPos < minPnl || pnlNeg < minPnl) return
@@ -104,7 +123,7 @@ function generateStructuredPosition(
   }
 }
 
-function generatePositions(chain: OptionRow[], spot: number, otmCount: number, maxResults: number, templateMove: number, minPnl: number): Position[] {
+function generatePositions(chain: OptionRow[], spot: number, otmCount: number, maxResults: number, templateMove: number, minPnl: number, minDelta: number): Position[] {
   const range = spot * 0.007
   const calls = chain.filter(r => r.type === 'call' && r.strike > spot - range && r.strike < spot + range).sort((a, b) => a.strike - b.strike)
   const puts = chain.filter(r => r.type === 'put' && r.strike < spot + range && r.strike > spot - range).sort((a, b) => a.strike - b.strike)
@@ -114,7 +133,7 @@ function generatePositions(chain: OptionRow[], spot: number, otmCount: number, m
     const otms = puts.filter(r => r.strike > spot)
     if (otms.length < otmCount) continue
     for (const g of getConsecutiveGroups(otms, otmCount)) {
-      const pos = generateStructuredPosition(itm, g, chain, spot, templateMove, minPnl)
+      const pos = generateStructuredPosition(itm, g, chain, spot, templateMove, minPnl, minDelta)
       if (pos) results.push(pos)
     }
   }
@@ -123,7 +142,7 @@ function generatePositions(chain: OptionRow[], spot: number, otmCount: number, m
     const otms = calls.filter(r => r.strike < spot)
     if (otms.length < otmCount) continue
     for (const g of getConsecutiveGroups(otms, otmCount)) {
-      const pos = generateStructuredPosition(itm, g, chain, spot, templateMove, minPnl)
+      const pos = generateStructuredPosition(itm, g, chain, spot, templateMove, minPnl, minDelta)
       if (pos) results.push(pos)
     }
   }
@@ -137,13 +156,14 @@ export default function TradeScanner({ date, chain, spotPrice }: Props) {
   const [maxCostFilter, setMaxCostFilter] = useState(20)
   const [templateMove, setTemplateMove] = useState(10)
   const [minPnl, setMinPnl] = useState(0)
+  const [minDelta, setMinDelta] = useState(0)
   const [selectedPos, setSelectedPos] = useState<string | null>(null)
 
   const positions = useMemo(() => {
     if (!spotPrice || chain.length === 0) return []
-    const results = generatePositions(chain, spotPrice, otmCount, maxResults * 5, templateMove, minPnl)
+    const results = generatePositions(chain, spotPrice, otmCount, maxResults * 5, templateMove, minPnl, minDelta)
     return results.filter(p => p.totalCost <= maxCostFilter).slice(0, maxResults)
-  }, [chain, spotPrice, otmCount, maxResults, maxCostFilter, templateMove, minPnl])
+  }, [chain, spotPrice, otmCount, maxResults, maxCostFilter, templateMove, minPnl, minDelta])
 
   const selected = positions.find(p => p.id === selectedPos)
 
@@ -185,6 +205,10 @@ export default function TradeScanner({ date, chain, spotPrice }: Props) {
           <div className="flex items-center gap-2">
             <label className="text-xs text-ztextdim">Min P&L (pts):</label>
             <input type="number" value={minPnl} onChange={e => setMinPnl(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.1} min={0} max={5} />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-ztextdim">Min Delta:</label>
+            <input type="number" value={minDelta} onChange={e => setMinDelta(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.05} min={0} max={1} />
           </div>
         </div>
       </div>
