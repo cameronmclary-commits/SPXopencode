@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { listSessions, loadDateParquet } from './data-loader.js';
+import { listSessions, loadDateParquet, warmCache } from './data-loader.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_DIR = path.resolve(__dirname, '..', 'spx-app', 'dist');
@@ -136,8 +136,10 @@ app.get('/api/chain/:date', async (req, res) => {
   }
 });
 
+let cacheProgress = { cached: 0, total: sessionList.length, ok: 0 };
+
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', datesAvailable: sessionList.length });
+  res.json({ status: 'ok', datesAvailable: sessionList.length, cache: cacheProgress });
 });
 
 app.use((req, res) => {
@@ -147,4 +149,11 @@ app.use((req, res) => {
 app.listen(PORT, () => {
   console.log('Options Data API running on http://localhost:' + PORT);
   console.log('Available dates: ' + sessionList.length);
+
+  warmCache((done, total, ok) => {
+    cacheProgress = { cached: done, total, ok };
+    const pct = ((done / total) * 100).toFixed(0);
+    process.stdout.write(`\rCache warm: ${done}/${total} (${pct}%) — ${ok} ok`);
+    if (done >= total) process.stdout.write('\n');
+  });
 });

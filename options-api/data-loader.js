@@ -103,6 +103,17 @@ function rowToObject(row, columns) {
   return obj;
 }
 
+export async function warmCache(onProgress) {
+  const BATCH_SIZE = 5;
+  for (let i = 0; i < KNOWN_DATES.length; i += BATCH_SIZE) {
+    const batch = KNOWN_DATES.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(batch.map(d => loadDateParquet(d)));
+    const done = Math.min(i + BATCH_SIZE, KNOWN_DATES.length);
+    const ok = results.filter(r => r.status === 'fulfilled').length;
+    onProgress?.(done, KNOWN_DATES.length, ok);
+  }
+}
+
 export async function loadDateParquet(dateStr) {
   const cachePath = path.join(CACHE_DIR, `${dateStr}.json`);
   if (fs.existsSync(cachePath)) {

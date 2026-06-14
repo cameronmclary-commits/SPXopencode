@@ -1,11 +1,11 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useMemo, useCallback } from 'react'
 import type { SessionData, OptionRow } from '../types'
 import { fetchSession } from '../api'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, ReferenceLine } from 'recharts'
 
 interface Leg {
   strike: number; type: 'call' | 'put'; quantity: number
-  delta: number; gamma: number; entryMid: number
+  delta: number; gamma: number; entryAsk: number; entryBid: number
 }
 
 interface BacktestTrade {
@@ -27,12 +27,12 @@ interface BacktestResult {
 }
 
 interface Params {
-  otmCount: number; maxCost: number; minScore: number; maxDelta: number
-  scanInterval: number; tpDollars: number; slDollars: number
-  yearStart: number; yearEnd: number
+  otmCount: number; maxCost: number; minScore: number; minCallDelta: number; minPutDelta: number
+  scanInterval: number; tpPoints: number; slPoints: number
 }
 
 const R = 0.05, T = 1 / 365
+const DEFAULT_IV = 0.15
 
 function cdf(x: number): number {
   const a = [0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429], p = 0.3275911
@@ -45,11 +45,6 @@ function cdf(x: number): number {
 
 function normPdf(x: number) { return Math.exp(-0.5 * x * x) / Math.SQRT2 / Math.sqrt(Math.PI) }
 function d1(S: number, K: number, T: number, r: number, sigma: number) { return (Math.log(S / K) + (r + sigma * sigma / 2) * T) / (sigma * Math.sqrt(T)) }
-function bsPrice(S: number, K: number, T: number, r: number, sigma: number, isCall: boolean): number {
-  if (T <= 0) return Math.max(0, isCall ? S - K : K - S)
-  const d = d1(S, K, T, r, sigma); const d2 = d - sigma * Math.sqrt(T)
-  return isCall ? S * cdf(d) - K * Math.exp(-r * T) * cdf(d2) : K * Math.exp(-r * T) * cdf(-d2) - S * cdf(-d)
-}
 function bsDelta(S: number, K: number, T: number, r: number, sigma: number, isCall: boolean): number {
   if (T <= 0) return isCall ? (S > K ? 1 : 0) : (S < K ? -1 : 0)
   return isCall ? cdf(d1(S, K, T, r, sigma)) : cdf(d1(S, K, T, r, sigma)) - 1
@@ -59,44 +54,60 @@ function bsGamma(S: number, K: number, T: number, r: number, sigma: number): num
   const d = d1(S, K, T, r, sigma); return normPdf(d) / (S * sigma * Math.sqrt(T))
 }
 
-function backoutIV(S: number, K: number, T: number, r: number, mid: number, isCall: boolean): number {
-  if (mid <= 0.01) return 0.3
-  if (mid <= Math.max(0, isCall ? S - K : K - S) + 0.01) return 0.3
+function extractAtmIv(chain: OptionRow[], spot: number): number {
+  const near = chain.filter(r => Math.abs(r.strike - spot) / spot < 0.005 && r.mid > 0.05)
+  if (near.length < 4) return DEFAULT_IV
+  const call = near.find(r => r.type === 'call' && r.strike <= spot)
+  const put = near.find(r => r.type === 'put' && r.strike >= spot)
+  if (!call || !put || call.mid <= 0.01 || put.mid <= 0.01) return DEFAULT_IV
+  const straddle = call.mid + put.mid
   let lo = 0.01, hi = 2.0
-  for (let i = 0; i < 30; i++) { const m = (lo + hi) / 2; if (bsPrice(S, K, T, r, m, isCall) > mid) hi = m; else lo = m }
-  return (lo + hi) / 2
+  for (let i = 0; i < 30; i++) {
+    const m = (lo + hi) / 2
+    try {
+      const d = d1(spot, call.strike, T, R, m)
+      const d2 = d - m * Math.sqrt(T)
+      const callP = spot * cdf(d) - call.strike * Math.exp(-R * T) * cdf(d2)
+      const putP = put.strike * Math.exp(-R * T) * cdf(-(d - m * Math.sqrt(T))) - spot * cdf(-d)
+      if (callP + putP > straddle) hi = m; else lo = m
+    } catch { hi = m }
+  }
+  return Math.min(1.0, Math.max(0.05, (lo + hi) / 2))
 }
 
-function surfacePrice(chain: OptionRow[], strike: number, type: 'call' | 'put', priceShift: number): number {
+function surfacePrice(chain: OptionRow[], strike: number, type: 'call' | 'put', priceShift: number, useAsk: boolean, entrySpot: number): number {
+  const movedSpot = entrySpot + priceShift
   const shifted = type === 'call' ? strike - priceShift : strike + priceShift
   const same = chain.filter(r => r.type === type).sort((a, b) => a.strike - b.strike)
-  if (same.length === 0) return 0
-  if (shifted <= same[0].strike || shifted >= same[same.length - 1].strike) return 0
+  const getPrice = (r: OptionRow) => useAsk ? r.ask : r.bid
+  if (same.length === 0) return Math.max(0, type === 'call' ? movedSpot - strike : strike - movedSpot)
+  if (shifted <= same[0].strike) return Math.max(0, type === 'call' ? movedSpot - strike : strike - movedSpot)
+  if (shifted >= same[same.length - 1].strike) return Math.max(0, type === 'call' ? movedSpot - strike : strike - movedSpot)
   let lo = 0, hi = same.length - 1
   while (hi - lo > 1) { const m = Math.floor((lo + hi) / 2); if (same[m].strike < shifted) lo = m; else hi = m }
   const t = (shifted - same[lo].strike) / (same[hi].strike - same[lo].strike)
-  return same[lo].mid + t * (same[hi].mid - same[lo].mid)
+  return getPrice(same[lo]) + t * (getPrice(same[hi]) - getPrice(same[lo]))
 }
 
-function generateOnce(allCalls: EnhRow[], allPuts: EnhRow[], spot: number, otmCount: number, maxCost: number, minScore: number): { legs: Leg[]; cost: number; score: number } | null {
+function generateOnce(allCalls: EnhRow[], allPuts: EnhRow[], spot: number, otmCount: number, maxCost: number, minScore: number, minCallDelta: number, minPutDelta: number): { legs: Leg[]; cost: number; score: number } | null {
   let best: { legs: Leg[]; cost: number; score: number } | null = null
-  const itmCalls = allCalls.filter(r => r.strike < spot && r.delta > 0.5)
-  const itmPuts = allPuts.filter(r => r.strike > spot && r.delta < -0.5)
+  const itmCalls = allCalls.filter(r => r.strike < spot && r.delta > minCallDelta)
+  const itmPuts = allPuts.filter(r => r.strike > spot && r.delta < -minPutDelta)
   const candidates: { legs: Leg[]; cost: number; score: number }[] = []
 
   for (const itm of itmCalls) {
-    const between = allPuts.filter(r => r.strike > itm.strike && r.strike < spot).sort((a, b) => b.strike - a.strike)
-    if (between.length < otmCount) continue
-    for (const otms of getConsecutiveGroups(between, otmCount)) {
+    const otmPuts = allPuts.filter(r => r.strike > spot).sort((a, b) => a.strike - b.strike)
+    if (otmPuts.length < otmCount) continue
+    for (const otms of getConsecutiveGroups(otmPuts, otmCount)) {
       const r = computePosition(itm, otms)
       if (r) candidates.push(r)
     }
   }
 
   for (const itm of itmPuts) {
-    const between = allCalls.filter(r => r.strike > spot && r.strike < itm.strike).sort((a, b) => a.strike - b.strike)
-    if (between.length < otmCount) continue
-    for (const otms of getConsecutiveGroups(between, otmCount)) {
+    const otmCalls = allCalls.filter(r => r.strike < spot).sort((a, b) => a.strike - b.strike)
+    if (otmCalls.length < otmCount) continue
+    for (const otms of getConsecutiveGroups(otmCalls, otmCount)) {
       const r = computePosition(itm, otms)
       if (r) candidates.push(r)
     }
@@ -117,12 +128,12 @@ function computePosition(itmRow: EnhRow, otmRows: EnhRow[]): { legs: Leg[]; cost
 
   const search = (idx: number, chosen: number[]) => {
     if (idx === n) {
-      let delta = itmRow.delta; let gamma = itmRow.gamma; let cost = itmRow.mid
-      const legs: Leg[] = [{ strike: itmRow.strike, type: itmRow.type, quantity: 1, delta: itmRow.delta, gamma: itmRow.gamma, entryMid: itmRow.mid }]
+      let delta = itmRow.delta; let gamma = itmRow.gamma; let cost = itmRow.ask
+      const legs: Leg[] = [{ strike: itmRow.strike, type: itmRow.type, quantity: 1, delta: itmRow.delta, gamma: itmRow.gamma, entryAsk: itmRow.ask, entryBid: itmRow.bid }]
       for (let i = 0; i < n; i++) {
         const q = chosen[i]; const r = otmRows[i]
-        delta += q * r.delta; gamma += q * r.gamma; cost += q * r.mid
-        legs.push({ strike: r.strike, type: r.type, quantity: q, delta: r.delta, gamma: r.gamma, entryMid: r.mid })
+        delta += q * r.delta; gamma += q * r.gamma; cost += q * r.ask
+        legs.push({ strike: r.strike, type: r.type, quantity: q, delta: r.delta, gamma: r.gamma, entryAsk: r.ask, entryBid: r.bid })
       }
       if (gamma <= 0 || Math.abs(delta) > 0.5) return
       const sc = gamma / (cost + 0.01) * 100 - Math.abs(delta) * 3
@@ -135,10 +146,9 @@ function computePosition(itmRow: EnhRow, otmRows: EnhRow[]): { legs: Leg[]; cost
   return best
 }
 
-interface EnhRow extends OptionRow { delta: number; gamma: number; iv: number }
-function enhance(r: OptionRow, spot: number): EnhRow {
-  const iv = backoutIV(spot, r.strike, T, R, r.mid, r.type === 'call')
-  return { ...r, iv, delta: bsDelta(spot, r.strike, T, R, iv, r.type === 'call'), gamma: bsGamma(spot, r.strike, T, R, iv) }
+interface EnhRow extends OptionRow { delta: number; gamma: number }
+function enhance(r: OptionRow, spot: number, iv: number): EnhRow {
+  return { ...r, delta: bsDelta(spot, r.strike, T, R, iv, r.type === 'call'), gamma: bsGamma(spot, r.strike, T, R, iv) }
 }
 
 function getConsecutiveGroups<T extends { strike: number }>(arr: T[], k: number): T[][] {
@@ -158,9 +168,10 @@ function repriceChain(chain: OptionRow[], spot: number, elapsed: number, total: 
   return chain.map(o => {
     if (o.strike <= 0) return o
     const sigma = iv * (1 + 0.2 * Math.abs(o.strike - spot) / spot)
-    const mp = bsPrice(spot, o.strike, tt, R, sigma, o.type === 'call')
-    const f = (o.mid || 0.01) > 0 ? mp / (o.mid || 0.01) : 1
-    return { ...o, bid: Math.max(0, o.mid * f * 0.9), ask: o.mid * f * 1.1, mid: mp, last: mp }
+    const mp = o.type === 'call'
+      ? spot * cdf(d1(spot, o.strike, tt, R, sigma)) - o.strike * Math.exp(-R * tt) * cdf(d1(spot, o.strike, tt, R, sigma) - sigma * Math.sqrt(tt))
+      : o.strike * Math.exp(-R * tt) * cdf(-(d1(spot, o.strike, tt, R, sigma) - sigma * Math.sqrt(tt))) - spot * cdf(-d1(spot, o.strike, tt, R, sigma))
+    return { ...o, bid: mp * 0.9, ask: mp * 1.1, mid: mp }
   })
 }
 
@@ -175,20 +186,20 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
     try { session = await fetchSession(dates[di]) } catch { continue }
 
     const totalTicks = session.pricePath.length
-    const iv = 0.2
+    const iv = extractAtmIv(session.openingChain, session.pricePath[0].price)
     let openTrade: { trade: BacktestTrade; legs: Leg[] } | null = null
     let sessionPnl = 0
-
     let entered = false
+
     for (let tick = 0; tick < totalTicks; tick += params.scanInterval) {
       const spot = session.pricePath[tick].price
       const repriced = repriceChain(session.openingChain, spot, tick, totalTicks, iv)
       const range = spot * 0.007
-      const calls = repriced.filter(r => r.type === 'call' && r.strike > spot - range && r.strike < spot + range).map(r => enhance(r, spot)).filter(r => Math.abs(r.delta) > 0.05 && Math.abs(r.delta) < 0.95)
-      const puts = repriced.filter(r => r.type === 'put' && r.strike < spot + range && r.strike > spot - range).map(r => enhance(r, spot)).filter(r => Math.abs(r.delta) > 0.05 && Math.abs(r.delta) < 0.95)
+      const calls = repriced.filter(r => r.type === 'call' && r.strike > spot - range && r.strike < spot + range).map(r => enhance(r, spot, iv))
+      const puts = repriced.filter(r => r.type === 'put' && r.strike < spot + range && r.strike > spot - range).map(r => enhance(r, spot, iv))
 
       if (!openTrade && !entered) {
-        const pos = generateOnce(calls, puts, spot, params.otmCount, params.maxCost, params.minScore)
+        const pos = generateOnce(calls, puts, spot, params.otmCount, params.maxCost, params.minScore, params.minCallDelta, params.minPutDelta)
         if (pos) {
           entered = true
           const trade: BacktestTrade = {
@@ -205,17 +216,17 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
       if (openTrade) {
         const { trade, legs } = openTrade
         const baseSpot = session.pricePath[0].price
-        const currentVal = legs.reduce((s, l) => s + l.quantity * surfacePrice(session.openingChain, l.strike, l.type, spot - baseSpot), 0)
+        const currentVal = legs.reduce((s, l) => s + l.quantity * surfacePrice(session.openingChain, l.strike, l.type, spot - baseSpot, false, baseSpot), 0)
         const pnl = currentVal - trade.entryCost
 
-        if (pnl >= params.tpDollars) {
+        if (pnl >= params.tpPoints) {
           trade.exitTick = tick; trade.exitTime = session.pricePath[tick].time
           trade.exitValue = currentVal; trade.pnl = pnl; trade.pnlPct = (pnl / trade.entryCost) * 100
           trade.exitReason = 'TP'
           cumPnl += pnl; sessionPnl += pnl
           trades.push(trade); openTrade = null
           equityCurve.push({ tick: equityCurve.length, pnl: cumPnl })
-        } else if (pnl <= -params.slDollars) {
+        } else if (pnl <= -params.slPoints) {
           trade.exitTick = tick; trade.exitTime = session.pricePath[tick].time
           trade.exitValue = currentVal; trade.pnl = pnl; trade.pnlPct = (pnl / trade.entryCost) * 100
           trade.exitReason = 'SL'
@@ -230,7 +241,7 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
       const { trade, legs } = openTrade
       const finalSpot = session.pricePath[totalTicks - 1].price
       const baseSpot = session.pricePath[0].price
-      const finalVal = legs.reduce((s, l) => s + l.quantity * surfacePrice(session.openingChain, l.strike, l.type, finalSpot - baseSpot), 0)
+      const finalVal = legs.reduce((s, l) => s + l.quantity * surfacePrice(session.openingChain, l.strike, l.type, finalSpot - baseSpot, false, baseSpot), 0)
       trade.exitTick = totalTicks - 1; trade.exitTime = session.pricePath[totalTicks - 1].time
       trade.exitValue = finalVal; trade.pnl = finalVal - trade.entryCost
       trade.pnlPct = trade.entryCost > 0 ? (trade.pnl / trade.entryCost) * 100 : 0
@@ -276,12 +287,15 @@ function computeMaxDrawdown(equity: number[]): number {
   return maxDD
 }
 
-export default function BacktestTab({ sessions }: { sessions: { date: string }[] }) {
+export default function BacktestTab({ sessions }: { sessions: { date: string; id: string }[] }) {
   const [params, setParams] = useState<Params>({
-    otmCount: 2, maxCost: 50, minScore: 5, maxDelta: 0.3,
-    scanInterval: 5, tpDollars: 1, slDollars: 2,
-    yearStart: 2024, yearEnd: 2025,
+    otmCount: 2, maxCost: 50, minScore: 0, minCallDelta: 0.5, minPutDelta: 0.5,
+    scanInterval: 5, tpPoints: 1, slPoints: 2,
   })
+  const [mode, setMode] = useState<'range' | 'pick'>('range')
+  const [yearStart, setYearStart] = useState(2024)
+  const [yearEnd, setYearEnd] = useState(2025)
+  const [selectedDates, setSelectedDates] = useState<Set<string>>(new Set())
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState(0)
   const [progressMsg, setProgressMsg] = useState('')
@@ -292,13 +306,26 @@ export default function BacktestTab({ sessions }: { sessions: { date: string }[]
     setParams(p => ({ ...p, [k]: v }))
   }, [])
 
+  const rangeDates = useMemo(() => {
+    return sessions.filter(s => {
+      const y = parseInt(s.date.slice(0, 4))
+      return y >= yearStart && y <= yearEnd
+    }).map(s => s.date)
+  }, [sessions, yearStart, yearEnd])
+
+  const toggleDate = (d: string) => {
+    setSelectedDates(prev => {
+      const next = new Set(prev)
+      if (next.has(d)) next.delete(d); else next.add(d)
+      return next
+    })
+  }
+
   const handleRun = async () => {
     setRunning(true); setProgress(0); setProgressMsg('Starting...'); setResult(null)
     canceledRef.current = false
-    const dates = sessions.map(s => s.date).filter(d => {
-      const y = parseInt(d.slice(0, 4))
-      return y >= params.yearStart && y <= params.yearEnd
-    }).slice(0, 50)
+    const dates = mode === 'range' ? rangeDates.slice(0, 50) : [...selectedDates].sort()
+    if (dates.length === 0) { setRunning(false); return }
 
     const res = await runBacktest(dates, params, (pct, msg) => {
       if (!canceledRef.current) { setProgress(pct); setProgressMsg(msg) }
@@ -311,30 +338,66 @@ export default function BacktestTab({ sessions }: { sessions: { date: string }[]
     <div className="space-y-4">
       <div className="bg-zgray/30 border border-zborder rounded-lg p-4">
         <h3 className="text-sm font-medium text-ztextdim mb-3">Backtest: Delta-Neutral Strategy</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <ParamInput label="OTM legs" value={params.otmCount} onChange={v => updateParam('otmCount', v)} min={2} max={3} />
-          <ParamInput label="Max Cost ($)" value={params.maxCost} onChange={v => updateParam('maxCost', v)} min={5} max={200} step={5} />
-          <ParamInput label="Min Score" value={params.minScore} onChange={v => updateParam('minScore', v)} min={0} max={50} step={1} />
-          <ParamInput label="Max |Delta|" value={params.maxDelta} onChange={v => updateParam('maxDelta', v)} min={0.05} max={0.5} step={0.05} />
-          <ParamInput label="Scan Interval (ticks)" value={params.scanInterval} onChange={v => updateParam('scanInterval', v)} min={1} max={20} step={1} />
-          <ParamInput label="Take Profit ($)" value={params.tpDollars} onChange={v => updateParam('tpDollars', v)} min={0.5} max={10} step={0.5} />
-          <ParamInput label="Stop Loss ($)" value={params.slDollars} onChange={v => updateParam('slDollars', v)} min={0.5} max={10} step={0.5} />
-          <div className="flex items-center gap-2">
-            <label className="text-xs text-ztextdim">Year:</label>
-            <select value={params.yearStart} onChange={e => { updateParam('yearStart', Number(e.target.value)); updateParam('yearEnd', Number(e.target.value) + 1) }} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext">
-              <option value={2024}>2024</option>
-              <option value={2025}>2025</option>
-            </select>
-          </div>
+
+        <div className="flex gap-2 mb-4">
+          <button onClick={() => setMode('range')} className={`px-3 py-1 text-xs rounded ${mode === 'range' ? 'bg-zcyan/20 text-zcyan border border-zcyan' : 'text-ztextdim border border-zborder'}`}>Range</button>
+          <button onClick={() => setMode('pick')} className={`px-3 py-1 text-xs rounded ${mode === 'pick' ? 'bg-zcyan/20 text-zcyan border border-zcyan' : 'text-ztextdim border border-zborder'}`}>Pick Dates</button>
         </div>
+
+        {mode === 'range' ? (
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <ParamInput label="OTM legs" value={params.otmCount} onChange={v => updateParam('otmCount', v)} min={2} max={3} />
+            <ParamInput label="Max Cost (pts)" value={params.maxCost} onChange={v => updateParam('maxCost', v)} min={5} max={200} step={5} />
+            <ParamInput label="Min Score" value={params.minScore} onChange={v => updateParam('minScore', v)} min={0} max={50} step={1} />
+            <ParamInput label="Min Call Delta" value={params.minCallDelta} onChange={v => updateParam('minCallDelta', v)} min={0.1} max={0.95} step={0.05} />
+            <ParamInput label="Min Put Delta" value={params.minPutDelta} onChange={v => updateParam('minPutDelta', v)} min={0.1} max={0.95} step={0.05} />
+            <ParamInput label="Scan Interval" value={params.scanInterval} onChange={v => updateParam('scanInterval', v)} min={1} max={20} step={1} />
+            <ParamInput label="TP (pts)" value={params.tpPoints} onChange={v => updateParam('tpPoints', v)} min={0.5} max={10} step={0.5} />
+            <ParamInput label="SL (pts)" value={params.slPoints} onChange={v => updateParam('slPoints', v)} min={0.5} max={10} step={0.5} />
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-ztextdim">Year:</label>
+              <select value={yearStart} onChange={e => { setYearStart(Number(e.target.value)); setYearEnd(Number(e.target.value) + 1) }} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext">
+                <option value={2024}>2024</option>
+                <option value={2025}>2025</option>
+              </select>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <ParamInput label="OTM legs" value={params.otmCount} onChange={v => updateParam('otmCount', v)} min={2} max={3} />
+              <ParamInput label="Max Cost (pts)" value={params.maxCost} onChange={v => updateParam('maxCost', v)} min={5} max={200} step={5} />
+              <ParamInput label="Min Score" value={params.minScore} onChange={v => updateParam('minScore', v)} min={0} max={50} step={1} />
+              <ParamInput label="Min Call Delta" value={params.minCallDelta} onChange={v => updateParam('minCallDelta', v)} min={0.1} max={0.95} step={0.05} />
+              <ParamInput label="Min Put Delta" value={params.minPutDelta} onChange={v => updateParam('minPutDelta', v)} min={0.1} max={0.95} step={0.05} />
+              <ParamInput label="Scan Interval" value={params.scanInterval} onChange={v => updateParam('scanInterval', v)} min={1} max={20} step={1} />
+              <ParamInput label="TP (pts)" value={params.tpPoints} onChange={v => updateParam('tpPoints', v)} min={0.5} max={10} step={0.5} />
+              <ParamInput label="SL (pts)" value={params.slPoints} onChange={v => updateParam('slPoints', v)} min={0.5} max={10} step={0.5} />
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2 items-center">
+              <span className="text-xs text-ztextdim">Select dates ({selectedDates.size} of {sessions.length}):</span>
+              <button onClick={() => setSelectedDates(new Set(sessions.map(s => s.date)))} className="text-xs px-2 py-0.5 rounded bg-zgray border border-zborder text-ztextdim hover:text-ztext">All</button>
+              <button onClick={() => setSelectedDates(new Set(sessions.slice(0, 30).map(s => s.date)))} className="text-xs px-2 py-0.5 rounded bg-zgray border border-zborder text-ztextdim hover:text-ztext">Last 30</button>
+              <button onClick={() => setSelectedDates(new Set(sessions.slice(0, 10).map(s => s.date)))} className="text-xs px-2 py-0.5 rounded bg-zgray border border-zborder text-ztextdim hover:text-ztext">Last 10</button>
+              <button onClick={() => setSelectedDates(new Set())} className="text-xs px-2 py-0.5 rounded bg-zgray border border-zborder text-ztextdim hover:text-ztext">None</button>
+            </div>
+            <div className="mt-2 max-h-40 overflow-y-auto border border-zborder rounded">
+              {sessions.map(s => (
+                <label key={s.date} className="flex items-center gap-2 px-3 py-1 text-xs hover:bg-zgray/20 cursor-pointer">
+                  <input type="checkbox" checked={selectedDates.has(s.date)} onChange={() => toggleDate(s.date)} className="accent-zcyan" />
+                  {s.date}
+                </label>
+              ))}
+            </div>
+          </>
+        )}
+
         <div className="mt-4 flex items-center gap-3">
           <button onClick={handleRun} disabled={running} className="px-4 py-1.5 text-sm font-medium rounded bg-zcyan/20 text-zcyan border border-zcyan hover:bg-zcyan/30 disabled:opacity-50">
             {running ? 'Running...' : 'Run Backtest'}
           </button>
           {running && (
-            <button onClick={() => { canceledRef.current = true; setRunning(false) }} className="px-3 py-1.5 text-xs text-zred border border-zred rounded">
-              Cancel
-            </button>
+            <button onClick={() => { canceledRef.current = true; setRunning(false) }} className="px-3 py-1.5 text-xs text-zred border border-zred rounded">Cancel</button>
           )}
         </div>
         {running && (
@@ -355,13 +418,13 @@ export default function BacktestTab({ sessions }: { sessions: { date: string }[]
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <MetricCard label="Total Trades" value={result.metrics.totalTrades} />
             <MetricCard label="Win Rate" value={`${(result.metrics.winRate * 100).toFixed(1)}%`} color={result.metrics.winRate > 0.5 ? 'text-zgreen' : 'text-zred'} />
-            <MetricCard label="Total P&L" value={`$${result.metrics.totalPnl.toFixed(2)}`} color={result.metrics.totalPnl >= 0 ? 'text-zgreen' : 'text-zred'} />
-            <MetricCard label="Avg P&L" value={`$${result.metrics.avgPnl.toFixed(2)}`} color={result.metrics.avgPnl >= 0 ? 'text-zgreen' : 'text-zred'} />
+            <MetricCard label="Total P&L" value={`${result.metrics.totalPnl.toFixed(2)} pts`} color={result.metrics.totalPnl >= 0 ? 'text-zgreen' : 'text-zred'} />
+            <MetricCard label="Avg P&L" value={`${result.metrics.avgPnl.toFixed(2)} pts`} color={result.metrics.avgPnl >= 0 ? 'text-zgreen' : 'text-zred'} />
             <MetricCard label="Max DD" value={`${(result.metrics.maxDrawdown * 100).toFixed(1)}%`} color="text-zred" />
             <MetricCard label="Profit Factor" value={result.metrics.profitFactor.toFixed(2)} />
             <MetricCard label="Sharpe" value={result.metrics.sharpe.toFixed(2)} color={result.metrics.sharpe > 1 ? 'text-zgreen' : result.metrics.sharpe > 0 ? 'text-zyellow' : 'text-zred'} />
-            <MetricCard label="Avg Win" value={`$${result.metrics.avgWin.toFixed(2)}`} color="text-zgreen" />
-            <MetricCard label="Avg Loss" value={`$${result.metrics.avgLoss.toFixed(2)}`} color="text-zred" />
+            <MetricCard label="Avg Win" value={`${result.metrics.avgWin.toFixed(2)} pts`} color="text-zgreen" />
+            <MetricCard label="Avg Loss" value={`${result.metrics.avgLoss.toFixed(2)} pts`} color="text-zred" />
             <MetricCard label="Avg Bars Held" value={result.metrics.avgBarsHeld.toFixed(1)} />
           </div>
 
@@ -374,7 +437,7 @@ export default function BacktestTab({ sessions }: { sessions: { date: string }[]
                   <XAxis dataKey="tick" tick={{ fontSize: 10, fill: '#6b7280' }} />
                   <YAxis tick={{ fontSize: 10, fill: '#6b7280' }} />
                   <ReferenceLine y={0} stroke="#2a2a4a" />
-                  <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid #2a2a4a', borderRadius: 6, fontSize: 11 }} formatter={(v) => [`$${Number(v).toFixed(2)}`, 'P&L']} />
+                  <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid #2a2a4a', borderRadius: 6, fontSize: 11 }} formatter={(v) => [`${Number(v).toFixed(2)}`, 'P&L']} />
                   <Area type="monotone" dataKey="pnl" stroke="#06b6d4" fill="url(#eqGrad)" strokeWidth={2} />
                 </AreaChart>
               </ResponsiveContainer>
@@ -385,10 +448,10 @@ export default function BacktestTab({ sessions }: { sessions: { date: string }[]
               <ResponsiveContainer width="100%" height={200}>
                 <BarChart data={(() => {
                   const pnls = result.trades.map(t => t.pnl)
-                  const maxP = Math.max(...pnls.map(p => Math.abs(p)))
+                  const maxP = Math.max(...pnls.map(p => Math.abs(p)), 0.01)
                   const bins = 10; const width = (maxP * 2) / bins
                   const counts = Array(bins).fill(0)
-                  for (const p of pnls) { const idx = Math.min(Math.floor((p + maxP) / (maxP * 2 / bins)), bins - 1); counts[idx]++ }
+                  for (const p of pnls) { const idx = Math.min(Math.floor((p + maxP) / (maxP * 2 / bins)), bins - 1); counts[Math.max(0, idx)]++ }
                   return counts.map((c, i) => ({ bin: `${(-maxP + i * width).toFixed(1)}`, count: c }))
                 })()}>
                   <XAxis dataKey="bin" tick={{ fontSize: 9, fill: '#6b7280' }} />
@@ -426,17 +489,11 @@ export default function BacktestTab({ sessions }: { sessions: { date: string }[]
                         {' '}
                         <span className="text-zred">{t.legs.filter(l => l.type === 'put').map(l => `${l.strike.toFixed(0)}x${l.quantity}`).join('+')}</span>
                       </td>
-                      <td className="text-right px-2 py-1 font-mono">${t.entryCost.toFixed(2)}</td>
-                      <td className="text-right px-2 py-1 font-mono">${t.exitValue.toFixed(2)}</td>
-                      <td className={`text-right px-2 py-1 font-mono ${t.pnl >= 0 ? 'text-zgreen' : 'text-zred'}`}>
-                        ${t.pnl.toFixed(2)}
-                      </td>
-                      <td className={`text-right px-2 py-1 font-mono ${t.pnl >= 0 ? 'text-zgreen' : 'text-zred'}`}>
-                        {t.pnlPct > 0 ? '+' : ''}{t.pnlPct.toFixed(1)}%
-                      </td>
-                      <td className={`text-center px-2 py-1 ${t.exitReason === 'TP' ? 'text-zgreen' : t.exitReason === 'SL' ? 'text-zred' : 'text-ztextdim'}`}>
-                        {t.exitReason}
-                      </td>
+                      <td className="text-right px-2 py-1 font-mono">{t.entryCost.toFixed(2)}</td>
+                      <td className="text-right px-2 py-1 font-mono">{t.exitValue.toFixed(2)}</td>
+                      <td className={`text-right px-2 py-1 font-mono ${t.pnl >= 0 ? 'text-zgreen' : 'text-zred'}`}>{t.pnl > 0 ? '+' : ''}{t.pnl.toFixed(2)}</td>
+                      <td className={`text-right px-2 py-1 font-mono ${t.pnl >= 0 ? 'text-zgreen' : 'text-zred'}`}>{t.pnlPct > 0 ? '+' : ''}{t.pnlPct.toFixed(1)}%</td>
+                      <td className={`text-center px-2 py-1 ${t.exitReason === 'TP' ? 'text-zgreen' : t.exitReason === 'SL' ? 'text-zred' : 'text-ztextdim'}`}>{t.exitReason}</td>
                     </tr>
                   ))}
                 </tbody>
