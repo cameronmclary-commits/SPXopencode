@@ -75,20 +75,6 @@ function extractAtmIv(chain: OptionRow[], spot: number): number {
   return Math.min(1.0, Math.max(0.05, (lo + hi) / 2))
 }
 
-function surfacePrice(chain: OptionRow[], strike: number, type: 'call' | 'put', priceShift: number, useAsk: boolean, entrySpot: number): number {
-  const movedSpot = entrySpot + priceShift
-  const shifted = type === 'call' ? strike - priceShift : strike + priceShift
-  const same = chain.filter(r => r.type === type).sort((a, b) => a.strike - b.strike)
-  const getPrice = (r: OptionRow) => useAsk ? r.ask : r.bid
-  if (same.length === 0) return Math.max(0, type === 'call' ? movedSpot - strike : strike - movedSpot)
-  if (shifted <= same[0].strike) return Math.max(0, type === 'call' ? movedSpot - strike : strike - movedSpot)
-  if (shifted >= same[same.length - 1].strike) return Math.max(0, type === 'call' ? movedSpot - strike : strike - movedSpot)
-  let lo = 0, hi = same.length - 1
-  while (hi - lo > 1) { const m = Math.floor((lo + hi) / 2); if (same[m].strike < shifted) lo = m; else hi = m }
-  const t = (shifted - same[lo].strike) / (same[hi].strike - same[lo].strike)
-  return getPrice(same[lo]) + t * (getPrice(same[hi]) - getPrice(same[lo]))
-}
-
 function generateOnce(allCalls: EnhRow[], allPuts: EnhRow[], spot: number, otmCount: number, maxCost: number, minScore: number, minCallDelta: number, minPutDelta: number): { legs: Leg[]; cost: number; score: number } | null {
   let best: { legs: Leg[]; cost: number; score: number } | null = null
   const itmCalls = allCalls.filter(r => r.strike < spot && r.delta > minCallDelta)
@@ -215,8 +201,10 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
 
       if (openTrade) {
         const { trade, legs } = openTrade
-        const baseSpot = session.pricePath[0].price
-        const currentVal = legs.reduce((s, l) => s + l.quantity * surfacePrice(session.openingChain, l.strike, l.type, spot - baseSpot, false, baseSpot), 0)
+        const currentVal = legs.reduce((s, l) => {
+          const r = repriced.find(o => o.strike === l.strike && o.type === l.type)
+          return s + l.quantity * (r ? r.bid : 0)
+        }, 0)
         const pnl = currentVal - trade.entryCost
 
         if (pnl >= params.tpPoints) {
@@ -239,9 +227,13 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
 
     if (openTrade) {
       const { trade, legs } = openTrade
-      const finalSpot = session.pricePath[totalTicks - 1].price
-      const baseSpot = session.pricePath[0].price
-      const finalVal = legs.reduce((s, l) => s + l.quantity * surfacePrice(session.openingChain, l.strike, l.type, finalSpot - baseSpot, false, baseSpot), 0)
+      const finalTick = totalTicks - 1
+      const finalSpot = session.pricePath[finalTick].price
+      const finalRepriced = repriceChain(session.openingChain, finalSpot, finalTick, totalTicks, iv)
+      const finalVal = legs.reduce((s, l) => {
+        const r = finalRepriced.find(o => o.strike === l.strike && o.type === l.type)
+        return s + l.quantity * (r ? r.bid : 0)
+      }, 0)
       trade.exitTick = totalTicks - 1; trade.exitTime = session.pricePath[totalTicks - 1].time
       trade.exitValue = finalVal; trade.pnl = finalVal - trade.entryCost
       trade.pnlPct = trade.entryCost > 0 ? (trade.pnl / trade.entryCost) * 100 : 0
