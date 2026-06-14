@@ -49,7 +49,7 @@ function loadPersistedTrades(): OpenTrade[] {
 function savePersistedTrades(trades: OpenTrade[]) {
   try {
     localStorage.setItem(TRADES_KEY, JSON.stringify(trades))
-  } catch {}
+  } catch (e) { console.warn('Failed to save trades:', e) }
 }
 
 function loadApiBase(): string {
@@ -57,7 +57,7 @@ function loadApiBase(): string {
 }
 
 function saveApiBase(url: string) {
-  try { localStorage.setItem(API_KEY, url) } catch {}
+  try { localStorage.setItem(API_KEY, url) } catch (e) { console.warn('Failed to save API URL:', e) }
 }
 
 export default function LiveTab() {

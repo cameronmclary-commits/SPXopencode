@@ -139,7 +139,7 @@ export async function getOptionChain() {
           conid: contract.conid,
         })
       }
-    } catch { }
+    } catch (e) { console.warn('Failed to fetch snapshot for batch:', e.message) }
   }
 
   chain.sort((a, b) => a.strike - b.strike)
@@ -153,7 +153,7 @@ export async function getOptionChain() {
     if (spotData && spotData.length > 0) {
       spotPrice = parseFloat(spotData[0]['31']?.v) || 0
     }
-  } catch { }
+  } catch (e) { console.warn('Failed to fetch spot price:', e.message) }
 
   return { date: todayStr, spotPrice, chainSize: chain.length, chain }
 }
@@ -165,7 +165,7 @@ export async function getSpotPrice() {
       body: JSON.stringify({ conids: [SPX_CONID], fields: ['31'] }),
     })
     if (data && data.length > 0) return parseFloat(data[0]['31']?.v) || 0
-  } catch { }
+  } catch (e) { console.warn('Failed to fetch spot price:', e.message) }
   return 0
 }
 

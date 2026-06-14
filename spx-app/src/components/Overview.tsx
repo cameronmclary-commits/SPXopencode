@@ -54,7 +54,7 @@ export default function Overview({ data, loading }: Props) {
             if (sr.ok) { const d = await sr.json(); if (d.spot > 0) setLiveSpot(d.spot) }
           }
         }
-      } catch {}
+      } catch (e) { console.warn('Failed to fetch live data:', e) }
     }
     poll()
     const iv = setInterval(poll, 10000)
