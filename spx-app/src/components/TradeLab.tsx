@@ -7,32 +7,42 @@ interface Props {
   selectedDate: string
 }
 
-function bsPrice(S: number, K: number, T: number, r: number, sigma: number, isCall: boolean): number {
-  if (T <= 0) return Math.max(0, isCall ? S - K : K - S)
+interface PaperTrade {
+  id: string; strike: number; type: 'call' | 'put';
+  entryPrice: number; entryTick: number; quantity: number; status: 'open' | 'closed';
+  exitPrice?: number; exitTick?: number; pnl?: number
+}
+
+const R = 0.05
+
+function cdf(x: number): number {
+  const a = [0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429], p = 0.3275911
+  const s = x < 0 ? -1 : 1; const ax = Math.abs(x)
+  const t = 1 / (1 + p * ax)
+  let y = 1
+  for (let i = 4; i >= 0; i--) y = 1 - (a[i] * t + (i > 0 ? y : 0)) * t * Math.exp(-ax * ax)
+  return 0.5 * (1 + s * y)
+}
+
+function d1(S: number, K: number, t: number, r: number, sigma: number): number {
+  return (Math.log(S / K) + (r + sigma * sigma / 2) * t) / (sigma * Math.sqrt(t))
+}
+
+function bsPrice(S: number, K: number, t: number, r: number, sigma: number, isCall: boolean): number {
+  if (t <= 0) return Math.max(0, isCall ? S - K : K - S)
   if (sigma <= 0) return Math.max(0, isCall ? S - K : K - S)
-  const d1 = (Math.log(S / K) + (r + sigma * sigma / 2) * T) / (sigma * Math.sqrt(T))
-  const d2 = d1 - sigma * Math.sqrt(T)
-  const cdf = (x: number) => 0.5 * (1 + (x / Math.SQRT2) * 0.5) // simplified normal CDF
-  if (isCall) return S * cdf(d1) - K * Math.exp(-r * T) * cdf(d2)
-  return K * Math.exp(-r * T) * cdf(-d2) - S * cdf(-d1)
+  const d = d1(S, K, t, r, sigma)
+  const d2 = d - sigma * Math.sqrt(t)
+  return isCall ? S * cdf(d) - K * Math.exp(-r * t) * cdf(d2) : K * Math.exp(-r * t) * cdf(-d2) - S * cdf(-d)
 }
 
 function priceChain(spot: number, chain: OptionRow[], timeElapsed: number, totalDuration: number, iv: number): OptionRow[] {
-  const T = Math.max(0.001, (1 - timeElapsed / totalDuration) / 365)
-  const r = 0.05
+  const t = Math.max(0.001, (1 - timeElapsed / totalDuration) / 365)
   return chain.map(o => {
     if (o.strike <= 0) return o
     const sigma = iv * (1 + 0.2 * Math.abs(o.strike - spot) / spot)
-    const modelPrice = bsPrice(spot, o.strike, T, r, sigma, o.type === 'call')
-    const originalMid = o.mid || 0.01
-    const factor = originalMid > 0 ? modelPrice / originalMid : 1
-    return {
-      ...o,
-      bid: Math.max(0, originalMid * factor * 0.9),
-      ask: originalMid * factor * 1.1,
-      mid: modelPrice,
-      last: modelPrice,
-    }
+    const mp = bsPrice(spot, o.strike, t, R, sigma, o.type === 'call')
+    return { ...o, bid: mp * 0.9, ask: mp * 1.1, mid: mp, last: mp }
   })
 }
 
@@ -42,15 +52,11 @@ export default function TradeLab({ selectedDate }: Props) {
   const [playing, setPlaying] = useState(false)
   const [tick, setTick] = useState(0)
   const [speed, setSpeed] = useState(1)
-  const [iv, setIv] = useState(0.2)
-  const [paperTrades, setPaperTrades] = useState<{
-    id: string; strike: number; type: 'call' | 'put'; action: 'buy' | 'sell';
-    entryPrice: number; entryTick: number; quantity: number; status: 'open' | 'closed';
-    exitPrice?: number; exitTick?: number; pnl?: number
-  }[]>([])
+  const [iv, setIv] = useState(0.15)
+  const [paperTrades, setPaperTrades] = useState<PaperTrade[]>([])
   const [autoPilot, setAutoPilot] = useState(false)
-  const [tpPct, setTpPct] = useState(50)
-  const [slPct, setSlPct] = useState(25)
+  const [tpPts, setTpPts] = useState(1)
+  const [slPts, setSlPts] = useState(2)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
@@ -94,23 +100,7 @@ export default function TradeLab({ selectedDate }: Props) {
       id: Date.now().toString(),
       strike,
       type,
-      action: 'buy',
       entryPrice: option.ask,
-      entryTick: tick,
-      quantity: 1,
-      status: 'open',
-    }])
-  }, [repricedChain, tick])
-
-  const handleSell = useCallback((strike: number, type: 'call' | 'put') => {
-    const option = repricedChain.find(r => r.strike === strike && r.type === type)
-    if (!option) return
-    setPaperTrades(prev => [...prev, {
-      id: Date.now().toString(),
-      strike,
-      type,
-      action: 'sell',
-      entryPrice: option.bid,
       entryTick: tick,
       quantity: 1,
       status: 'open',
@@ -122,10 +112,8 @@ export default function TradeLab({ selectedDate }: Props) {
       if (t.id !== id || t.status !== 'open') return t
       const option = repricedChain.find(r => r.strike === t.strike && r.type === t.type)
       if (!option) return t
-      const exitPrice = t.action === 'buy' ? option.bid : option.ask
-      const pnl = t.action === 'buy'
-        ? (exitPrice - t.entryPrice) * t.quantity
-        : (t.entryPrice - exitPrice) * t.quantity
+      const exitPrice = option.bid
+      const pnl = (exitPrice - t.entryPrice) * t.quantity
       return { ...t, status: 'closed' as const, exitPrice, exitTick: tick, pnl }
     }))
   }, [repricedChain, tick])
@@ -139,15 +127,11 @@ export default function TradeLab({ selectedDate }: Props) {
     for (const t of openTrades) {
       const option = repricedChain.find(r => r.strike === t.strike && r.type === t.type)
       if (!option) continue
-      const currentVal = t.action === 'buy' ? option.bid : option.ask
-      const unrealized = t.action === 'buy'
-        ? (currentVal - t.entryPrice) / t.entryPrice * 100
-        : (t.entryPrice - currentVal) / t.entryPrice * 100
-
-      if (unrealized >= tpPct) closeTrade(t.id)
-      else if (unrealized <= -slPct) closeTrade(t.id)
+      const unrealized = (option.bid - t.entryPrice) * t.quantity
+      if (unrealized >= tpPts) closeTrade(t.id)
+      else if (unrealized <= -slPts) closeTrade(t.id)
     }
-  }, [autoPilot, tick, sessionData, paperTrades, repricedChain, tpPct, slPct, closeTrade])
+  }, [autoPilot, tick, sessionData, paperTrades, repricedChain, tpPts, slPts, closeTrade])
 
   if (loading) return <div className="text-center py-12 text-ztextdim animate-pulse">Loading session...</div>
   if (!sessionData) return <div className="text-center py-12 text-ztextdim">Select a session date.</div>
@@ -229,10 +213,11 @@ export default function TradeLab({ selectedDate }: Props) {
 
       {/* Repriced Chain */}
       <div className="bg-zgray/30 border border-zborder rounded-lg p-4">
-        <h3 className="text-sm font-medium text-ztextdim mb-3">Repriced Chain (BSM, spot=${currentPrice.toFixed(0)})</h3>
+        <h3 className="text-sm font-medium text-ztextdim mb-3">Chain at ${currentPrice.toFixed(0)} (BSM bid/ask)</h3>
+        <p className="text-xs text-ztextdim mb-3">Click <span className="text-zgreen">Buy</span> to enter a long at ask price. Close later at the bid price.</p>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <MiniChainTable title="CALLS" rows={repricedChain.filter(r => r.type === 'call').slice(0, 15)} color="text-zgreen" showActions onBuy={handleBuy} onSell={handleSell} />
-          <MiniChainTable title="PUTS" rows={repricedChain.filter(r => r.type === 'put').slice(0, 15)} color="text-zred" showActions onBuy={handleBuy} onSell={handleSell} />
+          <MiniChainTable title="CALLS" rows={repricedChain.filter(r => r.type === 'call').slice(0, 15)} color="text-zgreen" showActions onBuy={handleBuy} />
+          <MiniChainTable title="PUTS" rows={repricedChain.filter(r => r.type === 'put').slice(0, 15)} color="text-zred" showActions onBuy={handleBuy} />
         </div>
       </div>
 
@@ -268,28 +253,24 @@ export default function TradeLab({ selectedDate }: Props) {
               <tbody>
                 {paperTrades.map(t => {
                   const option = repricedChain.find(r => r.strike === t.strike && r.type === t.type)
-                  const curVal = t.action === 'buy' ? option?.bid || 0 : option?.ask || 0
-                  const unrealizedPnl = t.action === 'buy'
-                    ? (curVal - t.entryPrice) * t.quantity
-                    : (t.entryPrice - curVal) * t.quantity
+                  const curVal = option?.bid || 0
+                  const unrealizedPnl = (curVal - t.entryPrice) * t.quantity
                   return (
                     <tr key={t.id} className="border-b border-zborder/50">
                       <td className="px-2 py-1 font-mono text-ztextdim">{t.id.slice(-4)}</td>
                       <td className="px-2 py-1 font-mono">{t.strike.toFixed(0)}</td>
                       <td className={`px-2 py-1 ${t.type === 'call' ? 'text-zgreen' : 'text-zred'}`}>{t.type.toUpperCase()}</td>
-                      <td className="text-right px-2 py-1 font-mono">${t.entryPrice.toFixed(2)}</td>
-                      <td className="text-right px-2 py-1 font-mono">${curVal.toFixed(2)}</td>
-                      <td className={`text-right px-2 py-1 font-mono ${t.status === 'closed' ? (t.pnl! >= 0 ? 'text-zgreen' : 'text-zred') : (unrealizedPnl >= 0 ? 'text-zgreen' : 'text-zred')}`}>
-                        ${t.status === 'closed' ? t.pnl!.toFixed(2) : unrealizedPnl.toFixed(2)}
+                      <td className="text-right px-2 py-1 font-mono">{t.entryPrice.toFixed(2)}</td>
+                      <td className="text-right px-2 py-1 font-mono">{curVal.toFixed(2)}</td>
+                      <td className={`text-right px-2 py-1 font-mono ${(t.pnl ?? unrealizedPnl) >= 0 ? 'text-zgreen' : 'text-zred'}`}>
+                        {(t.status === 'closed' ? t.pnl! : unrealizedPnl).toFixed(2)}
                       </td>
                       <td className={`text-center px-2 py-1 ${t.status === 'closed' ? 'text-ztextdim' : 'text-zyellow'}`}>
                         {t.status === 'closed' ? 'Closed' : 'Open'}
                       </td>
                       <td className="text-center px-2 py-1">
                         {t.status === 'open' && (
-                          <button onClick={() => closeTrade(t.id)} className="text-xs text-zred hover:text-zred/80">
-                            Close
-                          </button>
+                          <button onClick={() => closeTrade(t.id)} className="text-xs text-zred hover:text-zred/80">Close</button>
                         )}
                       </td>
                     </tr>
@@ -306,20 +287,20 @@ export default function TradeLab({ selectedDate }: Props) {
         <div className="flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={autoPilot} onChange={e => setAutoPilot(e.target.checked)} className="accent-zcyan" />
-            <span className="text-ztext">Auto-Pilot</span>
+            <span className="text-ztext">Auto-Close</span>
           </label>
           <div className="flex items-center gap-2">
             <label className="text-xs text-ztextdim">TP:</label>
-            <input type="number" value={tpPct} onChange={e => setTpPct(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" />
-            <span className="text-xs text-ztextdim">%</span>
+            <input type="number" value={tpPts} onChange={e => setTpPts(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.5} />
+            <span className="text-xs text-ztextdim">pts</span>
           </div>
           <div className="flex items-center gap-2">
             <label className="text-xs text-ztextdim">SL:</label>
-            <input type="number" value={slPct} onChange={e => setSlPct(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" />
-            <span className="text-xs text-ztextdim">%</span>
+            <input type="number" value={slPts} onChange={e => setSlPts(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.5} />
+            <span className="text-xs text-ztextdim">pts</span>
           </div>
           <span className="text-xs text-ztextdim">
-            Auto-pilot closes trades when P&L hits TP or SL (activates after 30% of session).
+            Closes open trades when P&L reaches TP or SL (activates after 30% of session).
           </span>
         </div>
       </div>
@@ -327,9 +308,9 @@ export default function TradeLab({ selectedDate }: Props) {
   )
 }
 
-function MiniChainTable({ title, rows, color, showActions, onBuy, onSell }: {
+function MiniChainTable({ title, rows, color, showActions, onBuy }: {
   title: string; rows: OptionRow[]; color: string;
-  showActions?: boolean; onBuy?: (strike: number, type: 'call' | 'put') => void; onSell?: (strike: number, type: 'call' | 'put') => void
+  showActions?: boolean; onBuy?: (strike: number, type: 'call' | 'put') => void
 }) {
   return (
     <div className="bg-zdark/50 border border-zborder rounded overflow-hidden">
@@ -342,8 +323,7 @@ function MiniChainTable({ title, rows, color, showActions, onBuy, onSell }: {
             <th className="text-left px-2 py-1">Strike</th>
             <th className="text-right px-2 py-1">Bid</th>
             <th className="text-right px-2 py-1">Ask</th>
-            <th className="text-right px-2 py-1">Mid</th>
-            {showActions && <th className="text-center px-2 py-1">Trade</th>}
+            {showActions && <th className="text-center px-2 py-1">Buy @ Ask</th>}
           </tr>
         </thead>
         <tbody>
@@ -352,11 +332,9 @@ function MiniChainTable({ title, rows, color, showActions, onBuy, onSell }: {
               <td className={`px-2 py-1 font-mono ${color}`}>{r.strike.toFixed(0)}</td>
               <td className="text-right px-2 py-1 font-mono">{r.bid.toFixed(2)}</td>
               <td className="text-right px-2 py-1 font-mono">{r.ask.toFixed(2)}</td>
-              <td className="text-right px-2 py-1 font-mono">{r.mid.toFixed(2)}</td>
               {showActions && (
                 <td className="text-center px-2 py-1">
-                  <button onClick={() => onBuy?.(r.strike, r.type)} className="text-xs text-zgreen hover:text-zgreen/80 mr-1">Buy</button>
-                  <button onClick={() => onSell?.(r.strike, r.type)} className="text-xs text-zred hover:text-zred/80">Sell</button>
+                  <button onClick={() => onBuy?.(r.strike, r.type)} className="text-xs text-zgreen hover:text-zgreen/80 px-2 py-0.5 border border-zgreen/30 rounded">Buy</button>
                 </td>
               )}
             </tr>
