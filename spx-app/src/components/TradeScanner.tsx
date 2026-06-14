@@ -52,6 +52,8 @@ function generateStructuredPosition(
   otmRows: OptionRow[],
   chain: OptionRow[],
   spot: number,
+  templateMove: number,
+  minPnl: number,
 ): Position | null {
   const nOtm = otmRows.length
   let bestCallLegs: Leg[] = []
@@ -76,12 +78,13 @@ function generateStructuredPosition(
         ;(r.type === 'call' ? callLegs : putLegs).push(leg)
       }
       const legs = [...callLegs, ...putLegs]
-      const pnl5 = pnLat(legs, 5) - cost
-      const pnlN5 = pnLat(legs, -5) - cost
-      const pnl10 = pnLat(legs, 10) - cost
-      const pnlN10 = pnLat(legs, -10) - cost
-      if (pnl10 <= 0 || pnlN10 <= 0) return
-      const sc = Math.min(pnl10, pnlN10) / (cost + 0.01) * 100 + (pnl5 > 0 && pnlN5 > 0 ? 10 : 0)
+      const pnlPos = pnLat(legs, templateMove) - cost
+      const pnlNeg = pnLat(legs, -templateMove) - cost
+      if (pnlPos < minPnl || pnlNeg < minPnl) return
+      const half = templateMove / 2
+      const pnlHalfPos = pnLat(legs, half) - cost
+      const pnlHalfNeg = pnLat(legs, -half) - cost
+      const sc = Math.min(pnlPos, pnlNeg) / (cost + 0.01) * 100 + (pnlHalfPos > 0 && pnlHalfNeg > 0 ? 5 : 0)
       if (sc > bestScore) { bestCallLegs = callLegs; bestPutLegs = putLegs; bestCost = cost; bestScore = sc }
       return
     }
@@ -101,7 +104,7 @@ function generateStructuredPosition(
   }
 }
 
-function generatePositions(chain: OptionRow[], spot: number, otmCount: number, maxResults: number): Position[] {
+function generatePositions(chain: OptionRow[], spot: number, otmCount: number, maxResults: number, templateMove: number, minPnl: number): Position[] {
   const range = spot * 0.007
   const calls = chain.filter(r => r.type === 'call' && r.strike > spot - range && r.strike < spot + range).sort((a, b) => a.strike - b.strike)
   const puts = chain.filter(r => r.type === 'put' && r.strike < spot + range && r.strike > spot - range).sort((a, b) => a.strike - b.strike)
@@ -111,7 +114,7 @@ function generatePositions(chain: OptionRow[], spot: number, otmCount: number, m
     const otms = puts.filter(r => r.strike > spot)
     if (otms.length < otmCount) continue
     for (const g of getConsecutiveGroups(otms, otmCount)) {
-      const pos = generateStructuredPosition(itm, g, chain, spot)
+      const pos = generateStructuredPosition(itm, g, chain, spot, templateMove, minPnl)
       if (pos) results.push(pos)
     }
   }
@@ -120,7 +123,7 @@ function generatePositions(chain: OptionRow[], spot: number, otmCount: number, m
     const otms = calls.filter(r => r.strike < spot)
     if (otms.length < otmCount) continue
     for (const g of getConsecutiveGroups(otms, otmCount)) {
-      const pos = generateStructuredPosition(itm, g, chain, spot)
+      const pos = generateStructuredPosition(itm, g, chain, spot, templateMove, minPnl)
       if (pos) results.push(pos)
     }
   }
@@ -132,13 +135,15 @@ export default function TradeScanner({ date, chain, spotPrice }: Props) {
   const [otmCount, setOtmCount] = useState(2)
   const [maxResults, setMaxResults] = useState(20)
   const [maxCostFilter, setMaxCostFilter] = useState(20)
+  const [templateMove, setTemplateMove] = useState(10)
+  const [minPnl, setMinPnl] = useState(0)
   const [selectedPos, setSelectedPos] = useState<string | null>(null)
 
   const positions = useMemo(() => {
     if (!spotPrice || chain.length === 0) return []
-    const results = generatePositions(chain, spotPrice, otmCount, maxResults * 5)
+    const results = generatePositions(chain, spotPrice, otmCount, maxResults * 5, templateMove, minPnl)
     return results.filter(p => p.totalCost <= maxCostFilter).slice(0, maxResults)
-  }, [chain, spotPrice, otmCount, maxResults, maxCostFilter])
+  }, [chain, spotPrice, otmCount, maxResults, maxCostFilter, templateMove, minPnl])
 
   const selected = positions.find(p => p.id === selectedPos)
 
@@ -172,6 +177,14 @@ export default function TradeScanner({ date, chain, spotPrice }: Props) {
           <div className="flex items-center gap-2">
             <label className="text-xs text-ztextdim">Max Cost (pts):</label>
             <input type="number" value={maxCostFilter} onChange={e => setMaxCostFilter(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-ztextdim">Template (pts):</label>
+            <input type="number" value={templateMove} onChange={e => setTemplateMove(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={2.5} min={5} max={20} />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-ztextdim">Min P&L (pts):</label>
+            <input type="number" value={minPnl} onChange={e => setMinPnl(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.1} min={0} max={5} />
           </div>
         </div>
       </div>
