@@ -99,13 +99,6 @@ function chainSurfacePrice(chain: OptionRow[], strike: number, type: 'call' | 'p
   return getPrice(same[lo]) + t * (getPrice(same[hi]) - getPrice(same[lo]))
 }
 
-function scenarioPnl(legs: Leg[], chain: OptionRow[], spot: number, move: number): number {
-  return legs.reduce((sum, leg) => {
-    const exitVal = chainSurfacePrice(chain, leg.strike, leg.type, move, false, spot)
-    return sum + leg.quantity * (exitVal - leg.entryAsk)
-  }, 0)
-}
-
 function generateStructuredPosition(
   itmRow: EnhRow,
   otmRows: EnhRow[],
@@ -113,11 +106,10 @@ function generateStructuredPosition(
   spot: number,
 ): Position | null {
   const nOtm = otmRows.length
-  let best = { callLegs: [] as Leg[], putLegs: [] as Leg[], netDelta: 0, totalGamma: 0, totalCost: 0 }
-  let found = false
-  let bestScore = -Infinity
+  let best = { callLegs: [] as Leg[], putLegs: [] as Leg[], netDelta: 0, totalGamma: 0, totalCost: 0, score: -Infinity }
 
-  const isItmCall = itmRow.type === 'call'
+  const surfaceAsk = (strike: number, type: 'call' | 'put') => chainSurfacePrice(chain, strike, type, 0, true, spot)
+  const surfaceBid = (strike: number, type: 'call' | 'put') => chainSurfacePrice(chain, strike, type, 0, false, spot)
 
   const search = (idx: number, chosen: number[]) => {
     if (idx === nOtm) {
@@ -125,71 +117,38 @@ function generateStructuredPosition(
       const putLegs: Leg[] = []
       let delta = itmRow.delta
       let gamma = itmRow.gamma
-      let cost = itmRow.ask
-      const itmLeg: Leg = { strike: itmRow.strike, type: itmRow.type, quantity: 1, delta: itmRow.delta, gamma: itmRow.gamma, entryAsk: itmRow.ask, entryBid: itmRow.bid }
-      if (isItmCall) callLegs.push(itmLeg); else putLegs.push(itmLeg)
+      let cost = surfaceAsk(itmRow.strike, itmRow.type)
+      const itmLeg: Leg = { strike: itmRow.strike, type: itmRow.type, quantity: 1, delta: itmRow.delta, gamma: itmRow.gamma, entryAsk: cost, entryBid: surfaceBid(itmRow.strike, itmRow.type) }
+      ;(itmRow.type === 'call' ? callLegs : putLegs).push(itmLeg)
       for (let i = 0; i < nOtm; i++) {
-        const q = chosen[i]
-        const r = otmRows[i]
-        delta += q * r.delta
-        gamma += q * r.gamma
-        cost += q * r.ask
-        const leg: Leg = { strike: r.strike, type: r.type, quantity: q, delta: r.delta, gamma: r.gamma, entryAsk: r.ask, entryBid: r.bid }
-        if (r.type === 'call') callLegs.push(leg); else putLegs.push(leg)
+        const q = chosen[i]; const r = otmRows[i]
+        delta += q * r.delta; gamma += q * r.gamma
+        const ask = surfaceAsk(r.strike, r.type)
+        cost += q * ask
+        const leg: Leg = { strike: r.strike, type: r.type, quantity: q, delta: r.delta, gamma: r.gamma, entryAsk: ask, entryBid: surfaceBid(r.strike, r.type) }
+        ;(r.type === 'call' ? callLegs : putLegs).push(leg)
       }
-      if (gamma <= 0) return
-      const absDelta = Math.abs(delta)
-      if (absDelta > 0.5) return
-      const dScore = absDelta + cost * 0.005
-      if (dScore < bestScore || !found) {
-        bestScore = dScore
-        best = { callLegs, putLegs, netDelta: delta, totalGamma: gamma, totalCost: cost }
-        found = true
-      }
+      if (gamma <= 0 || Math.abs(delta) > 0.5) return
+      const sc = gamma / (cost + 0.01) * 100 - Math.abs(delta) * 3
+      if (sc > best.score) { best = { callLegs, putLegs, netDelta: delta, totalGamma: gamma, totalCost: cost, score: sc } }
       return
     }
-    const maxQ = idx === 0 ? 2 : 3
-    for (let q = 1; q <= maxQ; q++) {
-      chosen.push(q)
-      search(idx + 1, chosen)
-      chosen.pop()
-    }
+    for (let q = 1; q <= (idx === 0 ? 2 : 3); q++) { chosen.push(q); search(idx + 1, chosen); chosen.pop() }
   }
-
   search(0, [])
-  if (!found) return null
-
-  const legs = [...best.callLegs, ...best.putLegs]
-  const scenarios = [-10, -7.5, -5, -2.5, 0, 2.5, 5, 7.5, 10].map(move => ({
-    move,
-    pnl: scenarioPnl(legs, chain, spot, move),
-  }))
-  const minPnl = Math.min(...scenarios.map(s => s.pnl))
-  const maxPnl = Math.max(...scenarios.map(s => s.pnl))
-  const noLossAt5 = scenarios.find(s => Math.abs(s.move) === 5)!.pnl >= -0.5
-  if (!noLossAt5) return null
-
-  const pnlAt5 = scenarios.find(s => s.move === 5)!.pnl
-  const pnlNeg5 = scenarios.find(s => s.move === -5)!.pnl
-  const pnlAt10 = scenarios.find(s => s.move === 10)!.pnl
-  const pnlNeg10 = scenarios.find(s => s.move === -10)!.pnl
-  const symmetry5 = Math.abs(pnlAt5 - pnlNeg5)
-  const symmetry10 = Math.abs(pnlAt10 - pnlNeg10)
-  const avgPnl10 = (pnlAt10 + pnlNeg10) / 2
-
-  const gammaEff = best.totalCost > 0.01 ? best.totalGamma / best.totalCost : 0
-  const score = gammaEff * 100 - Math.abs(best.netDelta) * 3 - symmetry5 * 0.5 - symmetry10 * 0.3 + (avgPnl10 > 0 ? avgPnl10 : 0)
-
+  if (best.score === -Infinity) return null
   return {
-    id: `${isItmCall ? 'C' : 'P'}${itmRow.strike.toFixed(0)}_${nOtm}otm`,
-    callLegs: best.callLegs,
-    putLegs: best.putLegs,
-    netDelta: best.netDelta,
-    totalGamma: best.totalGamma,
-    totalCost: best.totalCost,
-    scenarios, minPnl, maxPnl,
-    convexity: best.totalGamma,
-    score,
+    id: `${itmRow.type === 'call' ? 'C' : 'P'}${itmRow.strike.toFixed(0)}_${nOtm}otm`,
+    callLegs: best.callLegs, putLegs: best.putLegs,
+    netDelta: best.netDelta, totalGamma: best.totalGamma, totalCost: best.totalCost,
+    scenarios: [-10, -7.5, -5, -2.5, 0, 2.5, 5, 7.5, 10].map(move => ({
+      move,
+      pnl: best.callLegs.concat(best.putLegs).reduce((s, l) => {
+        const exitVal = chainSurfacePrice(chain, l.strike, l.type, move, false, spot)
+        return s + l.quantity * (exitVal - l.entryAsk)
+      }, 0),
+    })),
+    minPnl: 0, maxPnl: 0, convexity: best.totalGamma, score: best.score,
   }
 }
 

@@ -149,6 +149,19 @@ function getConsecutiveGroups<T extends { strike: number }>(arr: T[], k: number)
   return r
 }
 
+function surfacePrice(chain: OptionRow[], strike: number, type: 'call' | 'put', priceShift: number, useAsk: boolean, entrySpot: number): number {
+  const shifted = type === 'call' ? strike - priceShift : strike + priceShift
+  const same = chain.filter(r => r.type === type).sort((a, b) => a.strike - b.strike)
+  const getPrice = (r: OptionRow) => useAsk ? r.ask : r.bid
+  if (same.length === 0) return Math.max(0, type === 'call' ? entrySpot + priceShift - strike : strike - (entrySpot + priceShift))
+  if (shifted <= same[0].strike) return Math.max(0.01, getPrice(same[0]))
+  if (shifted >= same[same.length - 1].strike) return Math.max(0.01, getPrice(same[same.length - 1]))
+  let lo = 0, hi = same.length - 1
+  while (hi - lo > 1) { const m = Math.floor((lo + hi) / 2); if (same[m].strike < shifted) lo = m; else hi = m }
+  const t = (shifted - same[lo].strike) / (same[hi].strike - same[lo].strike)
+  return getPrice(same[lo]) + t * (getPrice(same[hi]) - getPrice(same[lo]))
+}
+
 function repriceChain(chain: OptionRow[], spot: number, elapsed: number, total: number, iv: number): OptionRow[] {
   const tt = Math.max(0.001, (1 - elapsed / total) / 365)
   return chain.map(o => {
@@ -172,13 +185,15 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
     try { session = await fetchSession(dates[di]) } catch { continue }
 
     const totalTicks = session.pricePath.length
-    const iv = extractAtmIv(session.openingChain, session.pricePath[0].price)
-    let openTrade: { trade: BacktestTrade; legs: Leg[]; entryTick: number } | null = null
+    const baseSpot = session.pricePath[0].price
+    const iv = extractAtmIv(session.openingChain, baseSpot)
+    let openTrade: { trade: BacktestTrade; legs: Leg[]; entryTick: number; entrySpot: number } | null = null
     let sessionPnl = 0
     let entered = false
 
     for (let tick = 0; tick < totalTicks; tick += params.scanInterval) {
       const spot = session.pricePath[tick].price
+      const priceShift = spot - baseSpot
       const repriced = repriceChain(session.openingChain, spot, tick, totalTicks, iv)
       const range = spot * 0.007
       const calls = repriced.filter(r => r.type === 'call' && r.strike > spot - range && r.strike < spot + range).map(r => enhance(r, spot, iv))
@@ -188,24 +203,22 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
         const pos = generateOnce(calls, puts, spot, params.otmCount, params.maxCost, params.minScore, params.minCallDelta, params.minPutDelta)
         if (pos) {
           entered = true
+          const entryCost = pos.legs.reduce((s, l) => s + l.quantity * surfacePrice(session.openingChain, l.strike, l.type, priceShift, true, baseSpot), 0)
           const trade: BacktestTrade = {
             id: `${dates[di]}_${tick}`,
             date: dates[di], entryTick: tick, exitTick: tick,
             entryTime: session.pricePath[tick].time, exitTime: '',
-            legs: pos.legs, entryCost: pos.cost, exitValue: 0,
+            legs: pos.legs, entryCost, exitValue: 0,
             pnl: 0, pnlPct: 0, exitReason: '', score: pos.score,
           }
-          openTrade = { trade, legs: pos.legs, entryTick: tick }
+          openTrade = { trade, legs: pos.legs, entryTick: tick, entrySpot: spot }
         }
       }
 
       if (openTrade) {
         if (tick === openTrade.entryTick) continue
         const { trade, legs } = openTrade
-        const currentVal = legs.reduce((s, l) => {
-          const r = repriced.find(o => o.strike === l.strike && o.type === l.type)
-          return s + l.quantity * (r ? r.bid : 0)
-        }, 0)
+        const currentVal = legs.reduce((s, l) => s + l.quantity * surfacePrice(session.openingChain, l.strike, l.type, spot - baseSpot, false, baseSpot), 0)
         const pnl = currentVal - trade.entryCost
 
         if (pnl >= params.tpPoints) {
@@ -230,12 +243,8 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
       const { trade, legs } = openTrade
       const finalTick = totalTicks - 1
       const finalSpot = session.pricePath[finalTick].price
-      const finalRepriced = repriceChain(session.openingChain, finalSpot, finalTick, totalTicks, iv)
-      const finalVal = legs.reduce((s, l) => {
-        const r = finalRepriced.find(o => o.strike === l.strike && o.type === l.type)
-        return s + l.quantity * (r ? r.bid : 0)
-      }, 0)
-      trade.exitTick = totalTicks - 1; trade.exitTime = session.pricePath[totalTicks - 1].time
+      const finalVal = legs.reduce((s, l) => s + l.quantity * surfacePrice(session.openingChain, l.strike, l.type, finalSpot - baseSpot, false, baseSpot), 0)
+      trade.exitTick = finalTick; trade.exitTime = session.pricePath[finalTick].time
       trade.exitValue = finalVal; trade.pnl = finalVal - trade.entryCost
       trade.pnlPct = trade.entryCost > 0 ? (trade.pnl / trade.entryCost) * 100 : 0
       trade.exitReason = 'EOS'
