@@ -184,6 +184,16 @@ export default function LiveTab() {
   }, [closingIds])
 
   async function acceptTrade(trade: SuggestedTrade) {
+    const ok = window.confirm(
+      `Place trade?\n\n` +
+      `Type: ${trade.type}\n` +
+      `Template: ${trade.templatePts} pts\n` +
+      `Cost: ${trade.totalCost.toFixed(2)} pts\n` +
+      `Legs:\n` +
+      trade.legs.map(l => `  ${l.type.toUpperCase()} ${l.strike} × ${l.quantity}`).join('\n')
+    )
+    if (!ok) return
+
     setPlacing(trade.id)
     if (!accountId) {
       setError('No IBKR account ID available')
