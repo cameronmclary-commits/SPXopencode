@@ -52,6 +52,12 @@ function buildSessionFromRows(rows, dateStr) {
 
   const pricePath = [];
   const steps = 78;
+  const controlPoints = [
+    { t: 0, v: spotPrice },
+    { t: 0.2, v: high },
+    { t: 0.65, v: low },
+    { t: 1, v: close },
+  ]
   for (let i = 0; i <= steps; i++) {
     const pct = i / steps;
     const hours = 9.5 + pct * 6.5;
@@ -59,17 +65,14 @@ function buildSessionFromRows(rows, dateStr) {
     const m = Math.floor((hours - h) * 60);
     const time = String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
 
-    let price;
-    if (pct < 0.3) {
-      const t = pct / 0.3;
-      price = spotPrice + (high - spotPrice) * Math.sin(t * Math.PI / 2);
-    } else if (pct < 0.7) {
-      const t = (pct - 0.3) / 0.4;
-      price = high - (high - low) * t;
-    } else {
-      const t = (pct - 0.7) / 0.3;
-      price = low + (close - low) * (1 - Math.cos(t * Math.PI / 2));
+    let seg = 0
+    for (let j = 0; j < controlPoints.length - 1; j++) {
+      if (pct >= controlPoints[j].t && pct <= controlPoints[j + 1].t) { seg = j; break }
     }
+    const cp0 = controlPoints[seg], cp1 = controlPoints[seg + 1]
+    const localT = (pct - cp0.t) / (cp1.t - cp0.t)
+    const smoothT = localT * localT * (3 - 2 * localT)
+    const price = cp0.v + (cp1.v - cp0.v) * smoothT;
     pricePath.push({ time, price: Math.round(price * 100) / 100 });
   }
 

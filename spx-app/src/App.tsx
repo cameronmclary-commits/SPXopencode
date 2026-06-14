@@ -63,14 +63,15 @@ export default function App() {
   }, [selectedDate, loadSession])
 
   return (
-    <div className="min-h-screen bg-zdark text-ztext">
-      <header className="border-b border-zborder bg-zgray/50 backdrop-blur-sm sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 h-14 flex items-center justify-between">
+    <div className="min-h-screen text-ztext">
+      <header className="sticky top-0 z-50">
+        <div className="absolute inset-0 border-b border-zborder/80 bg-zgray/60 backdrop-blur-md" />
+        <div className="relative max-w-7xl mx-auto px-4 h-14 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <span className="text-xl font-bold text-white tracking-tight">
-              Zero<span className="text-zcyan">D</span>
+            <span className="text-xl font-bold text-white tracking-tight" style={{ textShadow: '0 0 20px rgba(6, 182, 212, 0.15)' }}>
+              Zero<span className="text-zcyan" style={{ textShadow: '0 0 20px rgba(6, 182, 212, 0.4)' }}>D</span>
             </span>
-            <span className="text-xs text-ztextdim hidden sm:inline">SPX 0DTE Dashboard</span>
+            <span className="text-xs text-ztextdim hidden sm:inline font-medium tracking-wide uppercase">SPX 0DTE Dashboard</span>
           </div>
           <div className="flex items-center gap-2">
             <span className={`w-2 h-2 rounded-full ${
@@ -81,18 +82,21 @@ export default function App() {
             </span>
           </div>
         </div>
-        <nav className="max-w-7xl mx-auto px-4 flex gap-1 overflow-x-auto pb-px">
+        <nav className="relative max-w-7xl mx-auto px-4 flex gap-1 overflow-x-auto">
           {tabs.map(t => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
-              className={`px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
+              className={`relative px-3 py-2 text-sm font-medium whitespace-nowrap transition-all duration-200 ${
                 tab === t.id
-                  ? 'border-zcyan text-zcyan'
-                  : 'border-transparent text-ztextdim hover:text-ztext hover:border-zborder'
+                  ? 'text-zcyan'
+                  : 'text-ztextdim hover:text-ztext'
               }`}
             >
               {t.label}
+              {tab === t.id && (
+                <span className="absolute bottom-0 left-2 right-2 h-0.5 bg-zcyan rounded-full animate-fade-in" style={{ boxShadow: '0 0 8px rgba(6, 182, 212, 0.5)' }} />
+              )}
             </button>
           ))}
         </nav>
@@ -100,8 +104,8 @@ export default function App() {
 
       <main className="max-w-7xl mx-auto px-4 py-6">
         {sessions.length > 0 && (
-          <div className="mb-4 flex items-center gap-2">
-            <label className="text-xs text-ztextdim">Session:</label>
+          <div className="mb-4 flex items-center gap-2 animate-fade-in">
+            <label className="text-xs text-ztextdim tracking-wide uppercase">Session:</label>
             <select
               value={selectedDate}
               onChange={e => setSelectedDate(e.target.value)}

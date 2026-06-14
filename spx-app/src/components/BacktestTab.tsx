@@ -303,7 +303,7 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
 
   return (
     <div className="space-y-4">
-      <div className="bg-zgray/30 border border-zborder rounded-lg p-4">
+      <div className="panel-bg border border-zborder rounded-lg p-4">
         <h3 className="text-sm font-medium text-ztextdim mb-3">Backtest: ±10 Profit Combo</h3>
 
         <div className="flex gap-2 mb-4">
@@ -400,7 +400,7 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div className="bg-zgray/30 border border-zborder rounded-lg p-4">
+            <div className="panel-bg border border-zborder rounded-lg p-4">
               <h3 className="text-sm font-medium text-ztextdim mb-3">Equity Curve</h3>
               <ResponsiveContainer width="100%" height={200}>
                 <AreaChart data={result.equityCurve}>
@@ -414,7 +414,7 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
               </ResponsiveContainer>
             </div>
 
-            <div className="bg-zgray/30 border border-zborder rounded-lg p-4">
+            <div className="panel-bg border border-zborder rounded-lg p-4">
               <h3 className="text-sm font-medium text-ztextdim mb-3">P&L Distribution</h3>
               <ResponsiveContainer width="100%" height={200}>
                 <BarChart data={(() => {
@@ -434,7 +434,7 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
             </div>
           </div>
 
-          <div className="bg-zgray/30 border border-zborder rounded-lg overflow-hidden">
+          <div className="panel-bg border border-zborder rounded-lg overflow-hidden">
             <div className="px-4 py-2 text-xs font-semibold text-ztextdim border-b border-zborder">
               Trades ({result.trades.length})
             </div>
@@ -480,8 +480,8 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
 function TimeInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
   return (
     <div>
-      <label className="text-xs text-ztextdim">{label}</label>
-      <input type="time" value={value} onChange={e => onChange(e.target.value)} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-full" />
+      <label className="text-[10px] text-ztextdim tracking-wide uppercase">{label}</label>
+      <input type="time" value={value} onChange={e => onChange(e.target.value)} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-full transition-all duration-200" />
     </div>
   )
 }
@@ -489,16 +489,16 @@ function TimeInput({ label, value, onChange }: { label: string; value: string; o
 function ParamInput({ label, value, onChange, min, max, step }: { label: string; value: number; onChange: (v: number) => void; min: number; max: number; step?: number }) {
   return (
     <div>
-      <label className="text-xs text-ztextdim">{label}</label>
-      <input type="number" value={value} onChange={e => onChange(Number(e.target.value))} min={min} max={max} step={step || 1} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-full" />
+      <label className="text-[10px] text-ztextdim tracking-wide uppercase">{label}</label>
+      <input type="number" value={value} onChange={e => onChange(Number(e.target.value))} min={min} max={max} step={step || 1} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-full transition-all duration-200" />
     </div>
   )
 }
 
 function MetricCard({ label, value, color }: { label: string; value: string | number; color?: string }) {
   return (
-    <div className="bg-zgray/30 border border-zborder rounded-lg p-3">
-      <div className="text-xs text-ztextdim mb-0.5">{label}</div>
+    <div className="panel-bg border border-zborder rounded-lg p-3">
+      <div className="text-[10px] text-ztextdim tracking-wide uppercase mb-0.5">{label}</div>
       <div className={`text-sm font-semibold font-mono ${color || 'text-white'}`}>{value}</div>
     </div>
   )
