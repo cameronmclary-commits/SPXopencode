@@ -1,0 +1,8 @@
+node_modules
+dist
+.cache
+.git
+*.log
+.DS_Store
+spx-app/node_modules
+spx-app/src

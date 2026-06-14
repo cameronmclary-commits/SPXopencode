@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: zerod-spx-dashboard
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: cd spx-app && npm ci && npm run build && cd ../options-api && npm ci --omit=dev
+    startCommand: cd options-api && node server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: PORT
+        value: 3080
