@@ -11,6 +11,7 @@ export function ParamInput({
         type="number"
         value={value}
         onChange={e => onChange(Number(e.target.value))}
+        onFocus={e => e.target.select()}
         min={min} max={max} step={step || 1}
         className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-20 transition-all duration-200"
       />

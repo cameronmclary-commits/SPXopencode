@@ -190,19 +190,19 @@ export default function TradeScanner({ date, chain, spotPrice }: Props) {
           </div>
           <div className="flex items-center gap-2">
             <label className="text-xs text-ztextdim">Max Cost (pts):</label>
-            <input type="number" value={maxCostFilter} onChange={e => setMaxCostFilter(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" />
+            <input type="number" value={maxCostFilter} onChange={e => setMaxCostFilter(Number(e.target.value))} onFocus={e => e.target.select()} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" />
           </div>
           <div className="flex items-center gap-2">
             <label className="text-xs text-ztextdim">Template (pts):</label>
-            <input type="number" value={templateMove} onChange={e => setTemplateMove(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={2.5} min={5} max={20} />
+            <input type="number" value={templateMove} onChange={e => setTemplateMove(Number(e.target.value))} onFocus={e => e.target.select()} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={2.5} min={5} max={20} />
           </div>
           <div className="flex items-center gap-2">
             <label className="text-xs text-ztextdim">Min P&L (pts):</label>
-            <input type="number" value={minPnl} onChange={e => setMinPnl(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.1} min={0} max={5} />
+            <input type="number" value={minPnl} onChange={e => setMinPnl(Number(e.target.value))} onFocus={e => e.target.select()} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.1} min={0} max={5} />
           </div>
           <div className="flex items-center gap-2">
             <label className="text-xs text-ztextdim">Min Delta:</label>
-            <input type="number" value={minDelta} onChange={e => setMinDelta(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.05} min={0} max={1} />
+            <input type="number" value={minDelta} onChange={e => setMinDelta(Number(e.target.value))} onFocus={e => e.target.select()} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.05} min={0} max={1} />
           </div>
         </div>
       </div>

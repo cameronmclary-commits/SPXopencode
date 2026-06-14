@@ -291,12 +291,12 @@ export default function TradeLab({ selectedDate }: Props) {
           </label>
           <div className="flex items-center gap-2">
             <label className="text-xs text-ztextdim">TP:</label>
-            <input type="number" value={tpPts} onChange={e => setTpPts(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.5} />
+            <input type="number" value={tpPts} onChange={e => setTpPts(Number(e.target.value))} onFocus={e => e.target.select()} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.5} />
             <span className="text-xs text-ztextdim">pts</span>
           </div>
           <div className="flex items-center gap-2">
             <label className="text-xs text-ztextdim">SL:</label>
-            <input type="number" value={slPts} onChange={e => setSlPts(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.5} />
+            <input type="number" value={slPts} onChange={e => setSlPts(Number(e.target.value))} onFocus={e => e.target.select()} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.5} />
             <span className="text-xs text-ztextdim">pts</span>
           </div>
           <span className="text-xs text-ztextdim">
