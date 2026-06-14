@@ -22,6 +22,10 @@ interface PricePoint {
   price: number
 }
 
+function timeInRange(t: string, start: string, end: string): boolean {
+  return t >= start && t <= end
+}
+
 export default function LiveTab() {
   const [status, setStatus] = useState<LiveStatus | null>(null)
   const [chain, setChain] = useState<LiveChain | null>(null)
@@ -30,7 +34,13 @@ export default function LiveTab() {
   const [uptime, setUptime] = useState(0)
   const [error, setError] = useState('')
   const [pollCount, setPollCount] = useState(0)
+  const [sessionStart, setSessionStart] = useState('09:30')
+  const [sessionEnd, setSessionEnd] = useState('16:00')
   const pollingRef = useRef(false)
+
+  const now = new Date()
+  const currentHHMM = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
+  const inSession = timeInRange(currentHHMM, sessionStart, sessionEnd)
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -168,6 +178,22 @@ export default function LiveTab() {
         </div>
 
         {error && <div className="mt-2 text-xs text-zred">{error}</div>}
+
+        <div className="flex flex-wrap gap-4 mt-4 pt-3 border-t border-zborder">
+          <div>
+            <label className="text-xs text-ztextdim">Session Start</label>
+            <input type="time" value={sessionStart} onChange={e => setSessionStart(e.target.value)} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext" />
+          </div>
+          <div>
+            <label className="text-xs text-ztextdim">Session End</label>
+            <input type="time" value={sessionEnd} onChange={e => setSessionEnd(e.target.value)} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext" />
+          </div>
+          <div className="flex items-center">
+            <span className={`text-xs ${inSession ? 'text-zgreen' : 'text-ztextdim'}`}>
+              {inSession ? 'In session hours' : `Outside session hours (${currentHHMM})`}
+            </span>
+          </div>
+        </div>
       </div>
 
       <TradeScanner

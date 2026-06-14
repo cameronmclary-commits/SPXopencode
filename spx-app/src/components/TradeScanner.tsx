@@ -123,27 +123,29 @@ function generateStructuredPosition(
   }
 }
 
-function generatePositions(chain: OptionRow[], spot: number, otmCount: number, maxResults: number, templateMove: number, minPnl: number, minDelta: number): Position[] {
+function generatePositions(chain: OptionRow[], spot: number, maxResults: number, templateMove: number, minPnl: number, minDelta: number): Position[] {
   const range = spot * 0.007
   const calls = chain.filter(r => r.type === 'call' && r.strike > spot - range && r.strike < spot + range).sort((a, b) => a.strike - b.strike)
   const puts = chain.filter(r => r.type === 'put' && r.strike < spot + range && r.strike > spot - range).sort((a, b) => a.strike - b.strike)
   const results: Position[] = []
 
-  for (const itm of calls.filter(r => r.strike < spot)) {
-    const otms = puts.filter(r => r.strike > spot)
-    if (otms.length < otmCount) continue
-    for (const g of getConsecutiveGroups(otms, otmCount)) {
-      const pos = generateStructuredPosition(itm, g, chain, spot, templateMove, minPnl, minDelta)
-      if (pos) results.push(pos)
+  for (const otmCount of [2, 3]) {
+    for (const itm of calls.filter(r => r.strike < spot)) {
+      const otms = puts.filter(r => r.strike > spot)
+      if (otms.length < otmCount) continue
+      for (const g of getConsecutiveGroups(otms, otmCount)) {
+        const pos = generateStructuredPosition(itm, g, chain, spot, templateMove, minPnl, minDelta)
+        if (pos) results.push(pos)
+      }
     }
-  }
 
-  for (const itm of puts.filter(r => r.strike > spot)) {
-    const otms = calls.filter(r => r.strike < spot)
-    if (otms.length < otmCount) continue
-    for (const g of getConsecutiveGroups(otms, otmCount)) {
-      const pos = generateStructuredPosition(itm, g, chain, spot, templateMove, minPnl, minDelta)
-      if (pos) results.push(pos)
+    for (const itm of puts.filter(r => r.strike > spot)) {
+      const otms = calls.filter(r => r.strike < spot)
+      if (otms.length < otmCount) continue
+      for (const g of getConsecutiveGroups(otms, otmCount)) {
+        const pos = generateStructuredPosition(itm, g, chain, spot, templateMove, minPnl, minDelta)
+        if (pos) results.push(pos)
+      }
     }
   }
 
@@ -151,7 +153,6 @@ function generatePositions(chain: OptionRow[], spot: number, otmCount: number, m
 }
 
 export default function TradeScanner({ date, chain, spotPrice }: Props) {
-  const [otmCount, setOtmCount] = useState(2)
   const [maxResults, setMaxResults] = useState(20)
   const [maxCostFilter, setMaxCostFilter] = useState(20)
   const [templateMove, setTemplateMove] = useState(10)
@@ -161,9 +162,9 @@ export default function TradeScanner({ date, chain, spotPrice }: Props) {
 
   const positions = useMemo(() => {
     if (!spotPrice || chain.length === 0) return []
-    const results = generatePositions(chain, spotPrice, otmCount, maxResults * 5, templateMove, minPnl, minDelta)
+    const results = generatePositions(chain, spotPrice, maxResults * 5, templateMove, minPnl, minDelta)
     return results.filter(p => p.totalCost <= maxCostFilter).slice(0, maxResults)
-  }, [chain, spotPrice, otmCount, maxResults, maxCostFilter, templateMove, minPnl, minDelta])
+  }, [chain, spotPrice, maxResults, maxCostFilter, templateMove, minPnl, minDelta])
 
   const selected = positions.find(p => p.id === selectedPos)
 
@@ -179,13 +180,6 @@ export default function TradeScanner({ date, chain, spotPrice }: Props) {
           Scanning {chain.filter(r => r.type === 'call').length} calls and {chain.filter(r => r.type === 'put').length} puts at <span className="text-white">${spotPrice.toFixed(2)}</span>.
         </p>
         <div className="flex flex-wrap gap-4 items-center">
-          <div className="flex items-center gap-2">
-            <label className="text-xs text-ztextdim">OTM legs:</label>
-            <select value={otmCount} onChange={e => setOtmCount(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext">
-              <option value={2}>2 OTM + 1 ITM</option>
-              <option value={3}>3 OTM + 1 ITM</option>
-            </select>
-          </div>
           <div className="flex items-center gap-2">
             <label className="text-xs text-ztextdim">Results:</label>
             <select value={maxResults} onChange={e => setMaxResults(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext">
