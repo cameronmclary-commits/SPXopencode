@@ -2,16 +2,14 @@ import { useState, useRef, useMemo, useCallback } from 'react'
 import type { SessionData, OptionRow } from '../types'
 import { fetchSession } from '../api'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, ReferenceLine } from 'recharts'
-
-interface Leg {
-  strike: number; type: 'call' | 'put'; quantity: number
-  entryAsk: number; entryBid: number
-}
+import { surfacePrice, numericDelta } from '../utils/pricing'
+import { ComboLeg, evalCombo } from '../utils/combos'
+import { ParamInput, TimeInput, MetricCard } from './shared/UI'
 
 interface BacktestTrade {
   id: string; date: string; entryTick: number; exitTick: number
   entryTime: string; exitTime: string
-  legs: Leg[]; entryCost: number; exitValue: number
+  legs: ComboLeg[]; entryCost: number; exitValue: number
   pnl: number; pnlPct: number; exitReason: string
   score: number
 }
@@ -40,94 +38,18 @@ function timeToMinutes(t: string): number {
   return h * 60 + m
 }
 
-function surfacePrice(chain: OptionRow[], strike: number, type: 'call' | 'put', priceShift: number, useAsk: boolean, entrySpot: number): number {
-  const shifted = strike - priceShift
-  const same = chain.filter(r => r.type === type).sort((a, b) => a.strike - b.strike)
-  const getPrice = (r: OptionRow) => useAsk ? r.ask : r.bid
-  if (same.length === 0) return Math.max(0.01, type === 'call' ? entrySpot + priceShift - strike : strike - (entrySpot + priceShift))
-  if (shifted <= same[0].strike) return Math.max(0.01, getPrice(same[0]))
-  if (shifted >= same[same.length - 1].strike) return Math.max(0.01, getPrice(same[same.length - 1]))
-  let lo = 0, hi = same.length - 1
-  while (hi - lo > 1) { const m = Math.floor((lo + hi) / 2); if (same[m].strike < shifted) lo = m; else hi = m }
-  const t = (shifted - same[lo].strike) / (same[hi].strike - same[lo].strike)
-  return getPrice(same[lo]) + t * (getPrice(same[hi]) - getPrice(same[lo]))
-}
-
-function surfaceMid(chain: OptionRow[], strike: number, type: 'call' | 'put', priceShift: number, baseSpot: number): number {
-  const bid = surfacePrice(chain, strike, type, priceShift, false, baseSpot)
-  const ask = surfacePrice(chain, strike, type, priceShift, true, baseSpot)
-  return (bid + ask) / 2
-}
-
-function numericDelta(chain: OptionRow[], strike: number, type: 'call' | 'put', spot: number, baseSpot: number): number {
-  const ps = spot - baseSpot
-  const up = surfaceMid(chain, strike, type, ps + 1, baseSpot)
-  const dn = surfaceMid(chain, strike, type, ps - 1, baseSpot)
-  return (up - dn) / 2
-}
-
-function getConsecutiveGroups<T extends { strike: number }>(arr: T[], k: number): T[][] {
-  if (arr.length < k) return []
-  const sorted = [...arr].sort((a, b) => a.strike - b.strike)
-  const r: T[][] = []
-  for (let i = 0; i <= sorted.length - k; i++) {
-    const g = sorted.slice(i, i + k)
-    const ok = g.every((_, j) => j === 0 || Math.abs(g[j].strike - g[j - 1].strike) === 5 || Math.abs(g[j].strike - g[j - 1].strike) === 0)
-    if (ok) r.push(g)
-  }
-  return r
-}
-
-function evalCombo(itm: OptionRow, otms: OptionRow[], chain: OptionRow[], baseSpot: number, spot: number, maxCost: number, templateMove: number, minPnl: number, minDelta: number): { legs: Leg[]; cost: number; score: number } | null {
-  const priceShift = spot - baseSpot
-  const ask = (r: OptionRow) => surfacePrice(chain, r.strike, r.type, priceShift, true, baseSpot)
-  const bid = (r: OptionRow, move: number) => surfacePrice(chain, r.strike, r.type, priceShift + move, false, baseSpot)
-
-  let best: { legs: Leg[]; cost: number; score: number } | null = null
-  let bestScore = -Infinity
-  const n = otms.length
-
-  const search = (idx: number, chosen: number[]) => {
-    if (idx === n) {
-      let cost = ask(itm)
-      const legs: Leg[] = [{ strike: itm.strike, type: itm.type, quantity: 1, entryAsk: ask(itm), entryBid: bid(itm, 0) }]
-      for (let i = 0; i < n; i++) {
-        const q = chosen[i]; const r = otms[i]; const a = ask(r)
-        cost += q * a
-        legs.push({ strike: r.strike, type: r.type, quantity: q, entryAsk: a, entryBid: bid(r, 0) })
-      }
-      if (cost > maxCost) return
-      if (minDelta > 0) {
-        for (const l of legs) {
-          if (Math.abs(numericDelta(chain, l.strike, l.type, spot, baseSpot)) < minDelta) return
-        }
-      }
-      const pnLat = (move: number) => legs.reduce((s, l) => s + l.quantity * surfacePrice(chain, l.strike, l.type, priceShift + move, false, baseSpot), 0)
-      const pnlPos = pnLat(templateMove) - cost
-      const pnlNeg = pnLat(-templateMove) - cost
-      if (pnlPos < minPnl || pnlNeg < minPnl) return
-      const sc = Math.min(pnlPos, pnlNeg) / (cost + 0.01) * 100
-      if (sc > bestScore) { bestScore = sc; best = { legs, cost, score: sc } }
-      return
-    }
-    for (let q = 1; q <= (idx === 0 ? 2 : 3); q++) { chosen.push(q); search(idx + 1, chosen); chosen.pop() }
-  }
-  search(0, [])
-  return best
-}
-
-function findBestCombo(chain: OptionRow[], baseSpot: number, spot: number, maxCost: number, templateMove: number, minPnl: number, minDelta: number): { legs: Leg[]; cost: number; score: number } | null {
+function findBestCombo(chain: OptionRow[], spot: number, maxCost: number, templateMove: number, minPnl: number, minDelta: number): { legs: ComboLeg[]; cost: number; score: number } | null {
   const range = spot * 0.007
   const calls = chain.filter(r => r.type === 'call' && r.strike > spot - range && r.strike < spot + range).sort((a, b) => a.strike - b.strike)
   const puts = chain.filter(r => r.type === 'put' && r.strike < spot + range && r.strike > spot - range).sort((a, b) => a.strike - b.strike)
 
-  let best: { legs: Leg[]; cost: number; score: number } | null = null
+  let best: { legs: ComboLeg[]; cost: number; score: number } | null = null
 
   for (const otmCount of [2, 3]) {
     for (const itm of calls.filter(r => r.strike < spot)) {
       const otms = puts.filter(r => r.strike > spot)
       for (const g of getConsecutiveGroups(otms, otmCount)) {
-        const r = evalCombo(itm, g, chain, baseSpot, spot, maxCost, templateMove, minPnl, minDelta)
+        const r = evalCombo(itm, g, chain, spot, maxCost, templateMove, minPnl, minDelta)
         if (r && (!best || r.score > best.score)) best = r
       }
     }
@@ -135,7 +57,7 @@ function findBestCombo(chain: OptionRow[], baseSpot: number, spot: number, maxCo
     for (const itm of puts.filter(r => r.strike > spot)) {
       const otms = calls.filter(r => r.strike < spot)
       for (const g of getConsecutiveGroups(otms, otmCount)) {
-        const r = evalCombo(itm, g, chain, baseSpot, spot, maxCost, templateMove, minPnl, minDelta)
+        const r = evalCombo(itm, g, chain, spot, maxCost, templateMove, minPnl, minDelta)
         if (r && (!best || r.score > best.score)) best = r
       }
     }
@@ -156,7 +78,7 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
 
     const totalTicks = session.pricePath.length
     const baseSpot = session.pricePath[0].price
-    let openTrade: { trade: BacktestTrade; legs: Leg[]; entryTick: number } | null = null
+    let openTrade: { trade: BacktestTrade; legs: ComboLeg[]; entryTick: number } | null = null
 
     let nextScanMin = -1
     for (let tick = 0; tick < totalTicks; tick++) {
@@ -165,7 +87,7 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
       const tickMin = timeToMinutes(tickTime)
 
       if (!openTrade && tickMin >= nextScanMin && timeInRange(tickTime, params.sessionStart, params.sessionEnd)) {
-        const pos = findBestCombo(session.openingChain, baseSpot, spot, params.maxCost, params.templateMove, params.minPnl, params.minDelta)
+        const pos = findBestCombo(session.openingChain, spot, params.maxCost, params.templateMove, params.minPnl, params.minDelta)
         if (pos) {
           const trade: BacktestTrade = {
             id: `${dates[di]}_${tick}`,
@@ -238,7 +160,7 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
   const returns = equityCurve.map((e, i) => i === 0 ? 0 : (e.pnl - equityCurve[i - 1].pnl))
   const avgR = returns.reduce((s, r) => s + r, 0) / (returns.length || 1)
   const stdR = Math.sqrt(returns.reduce((s, r) => s + (r - avgR) ** 2, 0) / (returns.length || 1))
-  const sharpe = stdR > 0 ? avgR / stdR * Math.sqrt(252) : 0
+  const sharpe = stdR > 0 ? avgR / stdR : 0
 
   onProgress(100, `Complete — ${trades.length} trades`)
   return { trades, equityCurve, metrics: { totalTrades: trades.length, winRate, avgPnl, medPnl, avgWin, avgLoss, maxDrawdown, profitFactor, sharpe, totalPnl: cumPnl, avgBarsHeld } }
@@ -477,29 +399,3 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
   )
 }
 
-function TimeInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
-  return (
-    <div>
-      <label className="text-[10px] text-ztextdim tracking-wide uppercase">{label}</label>
-      <input type="time" value={value} onChange={e => onChange(e.target.value)} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-full transition-all duration-200" />
-    </div>
-  )
-}
-
-function ParamInput({ label, value, onChange, min, max, step }: { label: string; value: number; onChange: (v: number) => void; min: number; max: number; step?: number }) {
-  return (
-    <div>
-      <label className="text-[10px] text-ztextdim tracking-wide uppercase">{label}</label>
-      <input type="number" value={value} onChange={e => onChange(Number(e.target.value))} min={min} max={max} step={step || 1} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-full transition-all duration-200" />
-    </div>
-  )
-}
-
-function MetricCard({ label, value, color }: { label: string; value: string | number; color?: string }) {
-  return (
-    <div className="panel-bg border border-zborder rounded-lg p-3">
-      <div className="text-[10px] text-ztextdim tracking-wide uppercase mb-0.5">{label}</div>
-      <div className={`text-sm font-semibold font-mono ${color || 'text-white'}`}>{value}</div>
-    </div>
-  )
-}

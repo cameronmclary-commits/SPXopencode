@@ -9,6 +9,8 @@ import Monitoring from './components/Monitoring'
 import HistoricalTab from './components/HistoricalTab'
 import BacktestTab from './components/BacktestTab'
 import LiveTab from './components/LiveTab'
+import PreMarket from './components/PreMarket'
+import ErrorBoundary from './components/shared/ErrorBoundary'
 
 type Tab = 'overview' | 'chain' | 'scanner' | 'lab' | 'monitoring' | 'historical' | 'premarket' | 'backtest' | 'live'
 
@@ -44,8 +46,8 @@ export default function App() {
         setSessions(s)
         if (s.length > 0 && !selectedDate) setSelectedDate(s[0].date)
       })
-      .catch(() => {})
-  }, [selectedDate])
+      .catch(() => setApiStatus('offline'))
+  }, [])
 
   const loadSession = useCallback(async (date: string) => {
     setLoading(true)
@@ -103,30 +105,33 @@ export default function App() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 py-6">
-        {sessions.length > 0 && (
-          <div className="mb-4 flex items-center gap-2 animate-fade-in">
-            <label className="text-xs text-ztextdim tracking-wide uppercase">Session:</label>
-            <select
-              value={selectedDate}
-              onChange={e => setSelectedDate(e.target.value)}
-              className="bg-zgray border border-zborder rounded px-2 py-1 text-sm text-ztext"
-            >
-              {sessions.map(s => (
-                <option key={s.date} value={s.date}>{s.date}</option>
-              ))}
-            </select>
-            {loading && <span className="text-xs text-ztextdim animate-pulse">loading...</span>}
-          </div>
-        )}
+        <ErrorBoundary>
+          {sessions.length > 0 && (
+            <div className="mb-4 flex items-center gap-2 animate-fade-in">
+              <label className="text-xs text-ztextdim tracking-wide uppercase">Session:</label>
+              <select
+                value={selectedDate}
+                onChange={e => setSelectedDate(e.target.value)}
+                className="bg-zgray border border-zborder rounded px-2 py-1 text-sm text-ztext"
+              >
+                {sessions.map(s => (
+                  <option key={s.date} value={s.date}>{s.date}</option>
+                ))}
+              </select>
+              {loading && <span className="text-xs text-ztextdim animate-pulse">loading...</span>}
+            </div>
+          )}
 
-        {tab === 'overview' && <Overview data={sessionData} loading={loading} />}
-        {tab === 'chain' && <ChainTab date={selectedDate} />}
-        {tab === 'scanner' && <TradeScanner date={selectedDate} chain={sessionData?.openingChain || []} spotPrice={sessionData?.spotPrice || 0} />}
-        {tab === 'lab' && <TradeLab selectedDate={selectedDate} />}
-        {tab === 'backtest' && <BacktestTab sessions={sessions} />}
-        {tab === 'live' && <LiveTab />}
-        {tab === 'monitoring' && <Monitoring />}
-        {tab === 'historical' && <HistoricalTab sessions={sessions} />}
+          {tab === 'overview' && <Overview data={sessionData} loading={loading} />}
+          {tab === 'chain' && <ChainTab date={selectedDate} />}
+          {tab === 'scanner' && <TradeScanner date={selectedDate} chain={sessionData?.openingChain || []} spotPrice={sessionData?.spotPrice || 0} />}
+          {tab === 'lab' && <TradeLab selectedDate={selectedDate} />}
+          {tab === 'backtest' && <BacktestTab sessions={sessions} />}
+          {tab === 'live' && <LiveTab />}
+          {tab === 'monitoring' && <Monitoring />}
+          {tab === 'historical' && <HistoricalTab sessions={sessions} />}
+          {tab === 'premarket' && <PreMarket />}
+        </ErrorBoundary>
       </main>
     </div>
   )
