@@ -9,147 +9,30 @@ interface Props {
 }
 
 interface Leg {
-  strike: number
-  type: 'call' | 'put'
-  quantity: number
-  delta: number
-  gamma: number
-  entryAsk: number
-  entryBid: number
+  strike: number; type: 'call' | 'put'; quantity: number
+  entryAsk: number; entryBid: number
 }
 
 interface Position {
   id: string
-  callLegs: Leg[]
-  putLegs: Leg[]
-  netDelta: number
-  totalGamma: number
+  callLegs: Leg[]; putLegs: Leg[]
   totalCost: number
   scenarios: { move: number; pnl: number }[]
-  minPnl: number
-  maxPnl: number
-  convexity: number
+  minPnl: number; maxPnl: number
   score: number
 }
 
-const R = 0.05
-const T = 1 / 365
-const DEFAULT_IV = 0.15
-
-function cdf(x: number): number {
-  const a = [0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429], p = 0.3275911
-  const s = x < 0 ? -1 : 1; const ax = Math.abs(x)
-  const t = 1 / (1 + p * ax)
-  let y = 1
-  for (let i = 4; i >= 0; i--) y = 1 - (a[i] * t + (i > 0 ? y : 0)) * t * Math.exp(-ax * ax)
-  return 0.5 * (1 + s * y)
-}
-
-function normPdf(x: number): number {
-  return Math.exp(-0.5 * x * x) / Math.SQRT2 / Math.sqrt(Math.PI)
-}
-
-function d1(S: number, K: number, T: number, r: number, sigma: number): number {
-  return (Math.log(S / K) + (r + sigma * sigma / 2) * T) / (sigma * Math.sqrt(T))
-}
-
-function bsDelta(S: number, K: number, T: number, r: number, sigma: number, isCall: boolean): number {
-  if (T <= 0) return isCall ? (S > K ? 1 : 0) : (S < K ? -1 : 0)
-  return isCall ? cdf(d1(S, K, T, r, sigma)) : cdf(d1(S, K, T, r, sigma)) - 1
-}
-
-function bsGamma(S: number, K: number, T: number, r: number, sigma: number): number {
-  if (T <= 0 || sigma <= 0) return 0
-  const d = d1(S, K, T, r, sigma)
-  return normPdf(d) / (S * sigma * Math.sqrt(T))
-}
-
-function extractAtmIv(chain: OptionRow[], spot: number): number {
-  const near = chain.filter(r => Math.abs(r.strike - spot) / spot < 0.005 && r.mid > 0.05)
-  if (near.length < 4) return DEFAULT_IV
-  const call = near.find(r => r.type === 'call' && r.strike <= spot)
-  const put = near.find(r => r.type === 'put' && r.strike >= spot)
-  if (!call || !put || call.mid <= 0.01 || put.mid <= 0.01) return DEFAULT_IV
-  const straddle = call.mid + put.mid
-  let lo = 0.01, hi = 2.0
-  for (let i = 0; i < 30; i++) {
-    const m = (lo + hi) / 2
-    try {
-      const d = d1(spot, call.strike, T, R, m)
-      const d2 = d - m * Math.sqrt(T)
-      const callP = spot * cdf(d) - call.strike * Math.exp(-R * T) * cdf(d2)
-      const putP = put.strike * Math.exp(-R * T) * cdf(-(d - m * Math.sqrt(T))) - spot * cdf(-d)
-      if (callP + putP > straddle) hi = m; else lo = m
-    } catch { hi = m }
-  }
-  return Math.min(1.0, Math.max(0.05, (lo + hi) / 2))
-}
-
 function chainSurfacePrice(chain: OptionRow[], strike: number, type: 'call' | 'put', priceShift: number, useAsk: boolean, entrySpot: number): number {
-  const movedSpot = entrySpot + priceShift
   const shifted = type === 'call' ? strike - priceShift : strike + priceShift
   const same = chain.filter(r => r.type === type).sort((a, b) => a.strike - b.strike)
   const getPrice = (r: OptionRow) => useAsk ? r.ask : r.bid
-  if (same.length === 0) return Math.max(0, type === 'call' ? movedSpot - strike : strike - movedSpot)
-  if (shifted <= same[0].strike) return Math.max(0, type === 'call' ? movedSpot - strike : strike - movedSpot)
-  if (shifted >= same[same.length - 1].strike) return Math.max(0, type === 'call' ? movedSpot - strike : strike - movedSpot)
+  if (same.length === 0) return Math.max(0.01, type === 'call' ? entrySpot + priceShift - strike : strike - (entrySpot + priceShift))
+  if (shifted <= same[0].strike) return Math.max(0.01, getPrice(same[0]))
+  if (shifted >= same[same.length - 1].strike) return Math.max(0.01, getPrice(same[same.length - 1]))
   let lo = 0, hi = same.length - 1
   while (hi - lo > 1) { const m = Math.floor((lo + hi) / 2); if (same[m].strike < shifted) lo = m; else hi = m }
   const t = (shifted - same[lo].strike) / (same[hi].strike - same[lo].strike)
   return getPrice(same[lo]) + t * (getPrice(same[hi]) - getPrice(same[lo]))
-}
-
-function generateStructuredPosition(
-  itmRow: EnhRow,
-  otmRows: EnhRow[],
-  chain: OptionRow[],
-  spot: number,
-): Position | null {
-  const nOtm = otmRows.length
-  let best = { callLegs: [] as Leg[], putLegs: [] as Leg[], netDelta: 0, totalGamma: 0, totalCost: 0, score: -Infinity }
-
-  const surfaceAsk = (strike: number, type: 'call' | 'put') => chainSurfacePrice(chain, strike, type, 0, true, spot)
-  const surfaceBid = (strike: number, type: 'call' | 'put') => chainSurfacePrice(chain, strike, type, 0, false, spot)
-
-  const search = (idx: number, chosen: number[]) => {
-    if (idx === nOtm) {
-      const callLegs: Leg[] = []
-      const putLegs: Leg[] = []
-      let delta = itmRow.delta
-      let gamma = itmRow.gamma
-      let cost = surfaceAsk(itmRow.strike, itmRow.type)
-      const itmLeg: Leg = { strike: itmRow.strike, type: itmRow.type, quantity: 1, delta: itmRow.delta, gamma: itmRow.gamma, entryAsk: cost, entryBid: surfaceBid(itmRow.strike, itmRow.type) }
-      ;(itmRow.type === 'call' ? callLegs : putLegs).push(itmLeg)
-      for (let i = 0; i < nOtm; i++) {
-        const q = chosen[i]; const r = otmRows[i]
-        delta += q * r.delta; gamma += q * r.gamma
-        const ask = surfaceAsk(r.strike, r.type)
-        cost += q * ask
-        const leg: Leg = { strike: r.strike, type: r.type, quantity: q, delta: r.delta, gamma: r.gamma, entryAsk: ask, entryBid: surfaceBid(r.strike, r.type) }
-        ;(r.type === 'call' ? callLegs : putLegs).push(leg)
-      }
-      if (gamma <= 0 || Math.abs(delta) > 0.5) return
-      const sc = gamma / (cost + 0.01) * 100 - Math.abs(delta) * 3
-      if (sc > best.score) { best = { callLegs, putLegs, netDelta: delta, totalGamma: gamma, totalCost: cost, score: sc } }
-      return
-    }
-    for (let q = 1; q <= (idx === 0 ? 2 : 3); q++) { chosen.push(q); search(idx + 1, chosen); chosen.pop() }
-  }
-  search(0, [])
-  if (best.score === -Infinity) return null
-  return {
-    id: `${itmRow.type === 'call' ? 'C' : 'P'}${itmRow.strike.toFixed(0)}_${nOtm}otm`,
-    callLegs: best.callLegs, putLegs: best.putLegs,
-    netDelta: best.netDelta, totalGamma: best.totalGamma, totalCost: best.totalCost,
-    scenarios: [-10, -7.5, -5, -2.5, 0, 2.5, 5, 7.5, 10].map(move => ({
-      move,
-      pnl: best.callLegs.concat(best.putLegs).reduce((s, l) => {
-        const exitVal = chainSurfacePrice(chain, l.strike, l.type, move, false, spot)
-        return s + l.quantity * (exitVal - l.entryAsk)
-      }, 0),
-    })),
-    minPnl: 0, maxPnl: 0, convexity: best.totalGamma, score: best.score,
-  }
 }
 
 function getConsecutiveGroups<T extends { strike: number }>(arr: T[], k: number): T[][] {
@@ -164,29 +47,80 @@ function getConsecutiveGroups<T extends { strike: number }>(arr: T[], k: number)
   return result
 }
 
-function generatePositions(allCalls: EnhRow[], allPuts: EnhRow[], chain: OptionRow[], spot: number, otmCount: number, maxResults: number): Position[] {
+function generateStructuredPosition(
+  itmRow: OptionRow,
+  otmRows: OptionRow[],
+  chain: OptionRow[],
+  spot: number,
+): Position | null {
+  const nOtm = otmRows.length
+  let bestCallLegs: Leg[] = []
+  let bestPutLegs: Leg[] = []
+  let bestCost = 0
+  let bestScore = -Infinity
+
+  const ask = (r: OptionRow) => chainSurfacePrice(chain, r.strike, r.type, 0, true, spot)
+  const pnLat = (legs: Leg[], move: number) => legs.reduce((s, l) => s + l.quantity * chainSurfacePrice(chain, l.strike, l.type, move, false, spot), 0)
+
+  const search = (idx: number, chosen: number[]) => {
+    if (idx === nOtm) {
+      const callLegs: Leg[] = []
+      const putLegs: Leg[] = []
+      let cost = ask(itmRow)
+      const itmLeg: Leg = { strike: itmRow.strike, type: itmRow.type, quantity: 1, entryAsk: cost, entryBid: chainSurfacePrice(chain, itmRow.strike, itmRow.type, 0, false, spot) }
+      ;(itmRow.type === 'call' ? callLegs : putLegs).push(itmLeg)
+      for (let i = 0; i < nOtm; i++) {
+        const q = chosen[i]; const r = otmRows[i]; const a = ask(r)
+        cost += q * a
+        const leg: Leg = { strike: r.strike, type: r.type, quantity: q, entryAsk: a, entryBid: chainSurfacePrice(chain, r.strike, r.type, 0, false, spot) }
+        ;(r.type === 'call' ? callLegs : putLegs).push(leg)
+      }
+      const legs = [...callLegs, ...putLegs]
+      const pnl5 = pnLat(legs, 5) - cost
+      const pnlN5 = pnLat(legs, -5) - cost
+      const pnl10 = pnLat(legs, 10) - cost
+      const pnlN10 = pnLat(legs, -10) - cost
+      if (pnl10 <= 0 || pnlN10 <= 0) return
+      const sc = Math.min(pnl10, pnlN10) / (cost + 0.01) * 100 + (pnl5 > 0 && pnlN5 > 0 ? 10 : 0)
+      if (sc > bestScore) { bestCallLegs = callLegs; bestPutLegs = putLegs; bestCost = cost; bestScore = sc }
+      return
+    }
+    for (let q = 1; q <= (idx === 0 ? 2 : 3); q++) { chosen.push(q); search(idx + 1, chosen); chosen.pop() }
+  }
+  search(0, [])
+  if (bestScore === -Infinity) return null
+  const legs = [...bestCallLegs, ...bestPutLegs]
+  const scenarios = [-15, -10, -7.5, -5, -2.5, 0, 2.5, 5, 7.5, 10, 15].map(move => ({ move, pnl: pnLat(legs, move) - bestCost }))
+  const pnls = scenarios.map(s => s.pnl)
+  return {
+    id: `${itmRow.type === 'call' ? 'C' : 'P'}${itmRow.strike.toFixed(0)}_${nOtm}otm`,
+    callLegs: bestCallLegs, putLegs: bestPutLegs,
+    totalCost: bestCost,
+    scenarios, minPnl: Math.min(...pnls), maxPnl: Math.max(...pnls),
+    score: bestScore,
+  }
+}
+
+function generatePositions(chain: OptionRow[], spot: number, otmCount: number, maxResults: number): Position[] {
+  const range = spot * 0.007
+  const calls = chain.filter(r => r.type === 'call' && r.strike > spot - range && r.strike < spot + range).sort((a, b) => a.strike - b.strike)
+  const puts = chain.filter(r => r.type === 'put' && r.strike < spot + range && r.strike > spot - range).sort((a, b) => a.strike - b.strike)
   const results: Position[] = []
 
-  const itmCalls = allCalls.filter(r => r.strike < spot && r.delta > 0.5)
-  for (const itm of itmCalls) {
-    const otmPuts = allPuts
-      .filter(r => r.strike > spot)
-      .sort((a, b) => a.strike - b.strike)
-    if (otmPuts.length < otmCount) continue
-    for (const otms of getConsecutiveGroups(otmPuts, otmCount)) {
-      const pos = generateStructuredPosition(itm, otms, chain, spot)
+  for (const itm of calls.filter(r => r.strike < spot)) {
+    const otms = puts.filter(r => r.strike > spot)
+    if (otms.length < otmCount) continue
+    for (const g of getConsecutiveGroups(otms, otmCount)) {
+      const pos = generateStructuredPosition(itm, g, chain, spot)
       if (pos) results.push(pos)
     }
   }
 
-  const itmPuts = allPuts.filter(r => r.strike > spot && r.delta < -0.5)
-  for (const itm of itmPuts) {
-    const otmCalls = allCalls
-      .filter(r => r.strike < spot)
-      .sort((a, b) => a.strike - b.strike)
-    if (otmCalls.length < otmCount) continue
-    for (const otms of getConsecutiveGroups(otmCalls, otmCount)) {
-      const pos = generateStructuredPosition(itm, otms, chain, spot)
+  for (const itm of puts.filter(r => r.strike > spot)) {
+    const otms = calls.filter(r => r.strike < spot)
+    if (otms.length < otmCount) continue
+    for (const g of getConsecutiveGroups(otms, otmCount)) {
+      const pos = generateStructuredPosition(itm, g, chain, spot)
       if (pos) results.push(pos)
     }
   }
@@ -194,69 +128,34 @@ function generatePositions(allCalls: EnhRow[], allPuts: EnhRow[], chain: OptionR
   return results.sort((a, b) => b.score - a.score).slice(0, maxResults)
 }
 
-interface EnhRow extends OptionRow {
-  delta: number
-  gamma: number
-}
-
-function enhanceRow(r: OptionRow, spot: number, iv: number): EnhRow {
-  if (r.strike <= 0) return { ...r, delta: 0, gamma: 0 }
-  const delta = bsDelta(spot, r.strike, T, R, iv, r.type === 'call')
-  const gamma = bsGamma(spot, r.strike, T, R, iv)
-  return { ...r, delta, gamma }
-}
-
 export default function TradeScanner({ date, chain, spotPrice }: Props) {
   const [otmCount, setOtmCount] = useState(2)
   const [maxResults, setMaxResults] = useState(20)
-  const [minGammaFilter, setMinGammaFilter] = useState(0)
   const [maxCostFilter, setMaxCostFilter] = useState(20)
   const [selectedPos, setSelectedPos] = useState<string | null>(null)
 
-  const calls = useMemo(() => {
-    if (!spotPrice) return []
-    const iv = extractAtmIv(chain, spotPrice)
-    const range = spotPrice * 0.007
-    return chain
-      .filter(r => r.type === 'call' && r.strike > spotPrice - range && r.strike < spotPrice + range)
-      .map(r => enhanceRow(r, spotPrice, iv))
-      .sort((a, b) => a.strike - b.strike)
-  }, [chain, spotPrice])
-
-  const puts = useMemo(() => {
-    if (!spotPrice) return []
-    const iv = extractAtmIv(chain, spotPrice)
-    const range = spotPrice * 0.007
-    return chain
-      .filter(r => r.type === 'put' && r.strike < spotPrice + range && r.strike > spotPrice - range)
-      .map(r => enhanceRow(r, spotPrice, iv))
-      .sort((a, b) => b.strike - a.strike)
-  }, [chain, spotPrice])
-
   const positions = useMemo(() => {
-    const results = generatePositions(calls, puts, chain, spotPrice, otmCount, maxResults * 5)
-    return results.filter(p =>
-      p.totalGamma >= minGammaFilter &&
-      p.totalCost <= maxCostFilter
-    ).slice(0, maxResults)
-  }, [calls, puts, chain, spotPrice, otmCount, maxResults, minGammaFilter, maxCostFilter])
+    if (!spotPrice || chain.length === 0) return []
+    const results = generatePositions(chain, spotPrice, otmCount, maxResults * 5)
+    return results.filter(p => p.totalCost <= maxCostFilter).slice(0, maxResults)
+  }, [chain, spotPrice, otmCount, maxResults, maxCostFilter])
 
   const selected = positions.find(p => p.id === selectedPos)
 
   if (!date || chain.length === 0) {
-    return <div className="text-center py-12 text-ztextdim">Select a session to scan for delta-neutral positions.</div>
+    return <div className="text-center py-12 text-ztextdim">Select a session to scan for ±10 profit combos.</div>
   }
 
   return (
     <div className="space-y-4">
       <div className="bg-zgray/30 border border-zborder rounded-lg p-4">
-        <h3 className="text-sm font-medium text-ztextdim mb-3">Delta-Neutral Scanner</h3>
+        <h3 className="text-sm font-medium text-ztextdim mb-3">±10 Profit Combo Scanner</h3>
         <p className="text-xs text-ztextdim mb-4">
-          Scanning {calls.length} calls and {puts.length} puts at spot <span className="text-white">${spotPrice.toFixed(2)}</span>.
+          Scanning {chain.filter(r => r.type === 'call').length} calls and {chain.filter(r => r.type === 'put').length} puts at <span className="text-white">${spotPrice.toFixed(2)}</span>.
         </p>
         <div className="flex flex-wrap gap-4 items-center">
           <div className="flex items-center gap-2">
-            <label className="text-xs text-ztextdim">OTM legs per side:</label>
+            <label className="text-xs text-ztextdim">OTM legs:</label>
             <select value={otmCount} onChange={e => setOtmCount(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext">
               <option value={2}>2 OTM + 1 ITM</option>
               <option value={3}>3 OTM + 1 ITM</option>
@@ -269,10 +168,6 @@ export default function TradeScanner({ date, chain, spotPrice }: Props) {
               <option value={20}>20</option>
               <option value={50}>50</option>
             </select>
-          </div>
-          <div className="flex items-center gap-2">
-            <label className="text-xs text-ztextdim">Min Gamma:</label>
-            <input type="number" value={minGammaFilter} onChange={e => setMinGammaFilter(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.001} />
           </div>
           <div className="flex items-center gap-2">
             <label className="text-xs text-ztextdim">Max Cost (pts):</label>
@@ -294,8 +189,6 @@ export default function TradeScanner({ date, chain, spotPrice }: Props) {
                 <thead className="sticky top-0 bg-zdark/95 backdrop-blur-sm">
                   <tr className="text-ztextdim border-b border-zborder">
                     <th className="text-left px-2 py-1.5">Legs</th>
-                    <th className="text-right px-2 py-1.5">D</th>
-                    <th className="text-right px-2 py-1.5">G</th>
                     <th className="text-right px-2 py-1.5">Cost</th>
                     <th className="text-right px-2 py-1.5">-5</th>
                     <th className="text-right px-2 py-1.5">+5</th>
@@ -318,8 +211,6 @@ export default function TradeScanner({ date, chain, spotPrice }: Props) {
                           {' / '}
                           <span className="text-zred">{p.putLegs.map(l => `${l.strike.toFixed(0)}${l.quantity > 1 ? `x${l.quantity}` : ''}`).join('+')}</span>
                         </td>
-                        <td className={`text-right px-2 py-1.5 font-mono ${Math.abs(p.netDelta) < 0.05 ? 'text-zgreen' : 'text-zyellow'}`}>{p.netDelta.toFixed(3)}</td>
-                        <td className="text-right px-2 py-1.5 font-mono text-zcyan">{p.totalGamma.toFixed(4)}</td>
                         <td className="text-right px-2 py-1.5 font-mono text-ztext">{p.totalCost.toFixed(2)}</td>
                         <td className={`text-right px-2 py-1.5 font-mono ${p5 >= 0 ? 'text-zgreen' : 'text-zred'}`}>{p5.toFixed(2)}</td>
                         <td className={`text-right px-2 py-1.5 font-mono ${p5p >= 0 ? 'text-zgreen' : 'text-zred'}`}>{p5p.toFixed(2)}</td>
@@ -343,7 +234,7 @@ export default function TradeScanner({ date, chain, spotPrice }: Props) {
                   {selected.callLegs.map(l => (
                     <div key={`${l.strike}-${l.type}`} className="flex justify-between text-zgreen font-mono">
                       <span>${l.strike.toFixed(0)} x{l.quantity}</span>
-                      <span>D={l.delta.toFixed(3)} G={l.gamma.toFixed(4)}</span>
+                      <span>@{l.entryAsk.toFixed(2)}</span>
                     </div>
                   ))}
                 </div>
@@ -352,13 +243,11 @@ export default function TradeScanner({ date, chain, spotPrice }: Props) {
                   {selected.putLegs.map(l => (
                     <div key={`${l.strike}-${l.type}`} className="flex justify-between text-zred font-mono">
                       <span>${l.strike.toFixed(0)} x{l.quantity}</span>
-                      <span>D={l.delta.toFixed(3)} G={l.gamma.toFixed(4)}</span>
+                      <span>@{l.entryAsk.toFixed(2)}</span>
                     </div>
                   ))}
                 </div>
                 <div className="border-t border-zborder pt-2 space-y-1">
-                  <Row label="Net Delta" value={selected.netDelta.toFixed(4)} />
-                  <Row label="Total Gamma" value={selected.totalGamma.toFixed(4)} color="text-zcyan" />
                   <Row label="Total Cost" value={`${selected.totalCost.toFixed(2)} pts`} />
                   <Row label="Min P&L" value={`${selected.minPnl.toFixed(2)}`} color={selected.minPnl >= 0 ? 'text-zgreen' : 'text-zred'} />
                   <Row label="Max P&L" value={`${selected.maxPnl.toFixed(2)}`} color={selected.maxPnl >= 0 ? 'text-zgreen' : 'text-zred'} />

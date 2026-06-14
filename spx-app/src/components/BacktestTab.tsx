@@ -5,7 +5,7 @@ import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, 
 
 interface Leg {
   strike: number; type: 'call' | 'put'; quantity: number
-  delta: number; gamma: number; entryAsk: number; entryBid: number
+  entryAsk: number; entryBid: number
 }
 
 interface BacktestTrade {
@@ -27,126 +27,7 @@ interface BacktestResult {
 }
 
 interface Params {
-  otmCount: number; maxCost: number; minScore: number; minCallDelta: number; minPutDelta: number
-  scanInterval: number; tpPoints: number; slPoints: number
-}
-
-const R = 0.05, T = 1 / 365
-const DEFAULT_IV = 0.15
-
-function cdf(x: number): number {
-  const a = [0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429], p = 0.3275911
-  const s = x < 0 ? -1 : 1; const ax = Math.abs(x)
-  const t = 1 / (1 + p * ax)
-  let y = 1
-  for (let i = 4; i >= 0; i--) y = 1 - (a[i] * t + (i > 0 ? y : 0)) * t * Math.exp(-ax * ax)
-  return 0.5 * (1 + s * y)
-}
-
-function normPdf(x: number) { return Math.exp(-0.5 * x * x) / Math.SQRT2 / Math.sqrt(Math.PI) }
-function d1(S: number, K: number, T: number, r: number, sigma: number) { return (Math.log(S / K) + (r + sigma * sigma / 2) * T) / (sigma * Math.sqrt(T)) }
-function bsDelta(S: number, K: number, T: number, r: number, sigma: number, isCall: boolean): number {
-  if (T <= 0) return isCall ? (S > K ? 1 : 0) : (S < K ? -1 : 0)
-  return isCall ? cdf(d1(S, K, T, r, sigma)) : cdf(d1(S, K, T, r, sigma)) - 1
-}
-function bsGamma(S: number, K: number, T: number, r: number, sigma: number): number {
-  if (T <= 0 || sigma <= 0) return 0
-  const d = d1(S, K, T, r, sigma); return normPdf(d) / (S * sigma * Math.sqrt(T))
-}
-
-function extractAtmIv(chain: OptionRow[], spot: number): number {
-  const near = chain.filter(r => Math.abs(r.strike - spot) / spot < 0.005 && r.mid > 0.05)
-  if (near.length < 4) return DEFAULT_IV
-  const call = near.find(r => r.type === 'call' && r.strike <= spot)
-  const put = near.find(r => r.type === 'put' && r.strike >= spot)
-  if (!call || !put || call.mid <= 0.01 || put.mid <= 0.01) return DEFAULT_IV
-  const straddle = call.mid + put.mid
-  let lo = 0.01, hi = 2.0
-  for (let i = 0; i < 30; i++) {
-    const m = (lo + hi) / 2
-    try {
-      const d = d1(spot, call.strike, T, R, m)
-      const d2 = d - m * Math.sqrt(T)
-      const callP = spot * cdf(d) - call.strike * Math.exp(-R * T) * cdf(d2)
-      const putP = put.strike * Math.exp(-R * T) * cdf(-(d - m * Math.sqrt(T))) - spot * cdf(-d)
-      if (callP + putP > straddle) hi = m; else lo = m
-    } catch { hi = m }
-  }
-  return Math.min(1.0, Math.max(0.05, (lo + hi) / 2))
-}
-
-function generateOnce(allCalls: EnhRow[], allPuts: EnhRow[], spot: number, otmCount: number, maxCost: number, minScore: number, minCallDelta: number, minPutDelta: number): { legs: Leg[]; cost: number; score: number } | null {
-  let best: { legs: Leg[]; cost: number; score: number } | null = null
-  const itmCalls = allCalls.filter(r => r.strike < spot && r.delta > minCallDelta)
-  const itmPuts = allPuts.filter(r => r.strike > spot && r.delta < -minPutDelta)
-  const candidates: { legs: Leg[]; cost: number; score: number }[] = []
-
-  for (const itm of itmCalls) {
-    const otmPuts = allPuts.filter(r => r.strike > spot).sort((a, b) => a.strike - b.strike)
-    if (otmPuts.length < otmCount) continue
-    for (const otms of getConsecutiveGroups(otmPuts, otmCount)) {
-      const r = computePosition(itm, otms)
-      if (r) candidates.push(r)
-    }
-  }
-
-  for (const itm of itmPuts) {
-    const otmCalls = allCalls.filter(r => r.strike < spot).sort((a, b) => a.strike - b.strike)
-    if (otmCalls.length < otmCount) continue
-    for (const otms of getConsecutiveGroups(otmCalls, otmCount)) {
-      const r = computePosition(itm, otms)
-      if (r) candidates.push(r)
-    }
-  }
-
-  for (const c of candidates) {
-    if (c.cost > maxCost) continue
-    if (c.score < minScore) continue
-    if (!best || c.score > best.score) best = c
-  }
-  return best
-}
-
-function computePosition(itmRow: EnhRow, otmRows: EnhRow[]): { legs: Leg[]; cost: number; score: number } | null {
-  let best: { legs: Leg[]; cost: number; score: number } | null = null
-  let bestScore = -Infinity
-  const n = otmRows.length
-
-  const search = (idx: number, chosen: number[]) => {
-    if (idx === n) {
-      let delta = itmRow.delta; let gamma = itmRow.gamma; let cost = itmRow.ask
-      const legs: Leg[] = [{ strike: itmRow.strike, type: itmRow.type, quantity: 1, delta: itmRow.delta, gamma: itmRow.gamma, entryAsk: itmRow.ask, entryBid: itmRow.bid }]
-      for (let i = 0; i < n; i++) {
-        const q = chosen[i]; const r = otmRows[i]
-        delta += q * r.delta; gamma += q * r.gamma; cost += q * r.ask
-        legs.push({ strike: r.strike, type: r.type, quantity: q, delta: r.delta, gamma: r.gamma, entryAsk: r.ask, entryBid: r.bid })
-      }
-      if (gamma <= 0 || Math.abs(delta) > 0.5) return
-      const sc = gamma / (cost + 0.01) * 100 - Math.abs(delta) * 3
-      if (sc > bestScore || !best) { bestScore = sc; best = { legs, cost, score: sc } }
-      return
-    }
-    for (let q = 1; q <= (idx === 0 ? 2 : 3); q++) { chosen.push(q); search(idx + 1, chosen); chosen.pop() }
-  }
-  search(0, [])
-  return best
-}
-
-interface EnhRow extends OptionRow { delta: number; gamma: number }
-function enhance(r: OptionRow, spot: number, iv: number): EnhRow {
-  return { ...r, delta: bsDelta(spot, r.strike, T, R, iv, r.type === 'call'), gamma: bsGamma(spot, r.strike, T, R, iv) }
-}
-
-function getConsecutiveGroups<T extends { strike: number }>(arr: T[], k: number): T[][] {
-  if (arr.length < k) return []
-  const sorted = [...arr].sort((a, b) => a.strike - b.strike)
-  const r: T[][] = []
-  for (let i = 0; i <= sorted.length - k; i++) {
-    const g = sorted.slice(i, i + k)
-    const ok = g.every((_, j) => j === 0 || Math.abs(g[j].strike - g[j - 1].strike) === 5 || Math.abs(g[j].strike - g[j - 1].strike) === 0)
-    if (ok) r.push(g)
-  }
-  return r
+  otmCount: number; maxCost: number; scanInterval: number; tpPoints: number; slPoints: number
 }
 
 function surfacePrice(chain: OptionRow[], strike: number, type: 'call' | 'put', priceShift: number, useAsk: boolean, entrySpot: number): number {
@@ -162,16 +43,75 @@ function surfacePrice(chain: OptionRow[], strike: number, type: 'call' | 'put', 
   return getPrice(same[lo]) + t * (getPrice(same[hi]) - getPrice(same[lo]))
 }
 
-function repriceChain(chain: OptionRow[], spot: number, elapsed: number, total: number, iv: number): OptionRow[] {
-  const tt = Math.max(0.001, (1 - elapsed / total) / 365)
-  return chain.map(o => {
-    if (o.strike <= 0) return o
-    const sigma = iv * (1 + 0.2 * Math.abs(o.strike - spot) / spot)
-    const mp = o.type === 'call'
-      ? spot * cdf(d1(spot, o.strike, tt, R, sigma)) - o.strike * Math.exp(-R * tt) * cdf(d1(spot, o.strike, tt, R, sigma) - sigma * Math.sqrt(tt))
-      : o.strike * Math.exp(-R * tt) * cdf(-(d1(spot, o.strike, tt, R, sigma) - sigma * Math.sqrt(tt))) - spot * cdf(-d1(spot, o.strike, tt, R, sigma))
-    return { ...o, bid: mp * 0.9, ask: mp * 1.1, mid: mp }
-  })
+function getConsecutiveGroups<T extends { strike: number }>(arr: T[], k: number): T[][] {
+  if (arr.length < k) return []
+  const sorted = [...arr].sort((a, b) => a.strike - b.strike)
+  const r: T[][] = []
+  for (let i = 0; i <= sorted.length - k; i++) {
+    const g = sorted.slice(i, i + k)
+    const ok = g.every((_, j) => j === 0 || Math.abs(g[j].strike - g[j - 1].strike) === 5 || Math.abs(g[j].strike - g[j - 1].strike) === 0)
+    if (ok) r.push(g)
+  }
+  return r
+}
+
+function evalCombo(itm: OptionRow, otms: OptionRow[], chain: OptionRow[], baseSpot: number, spot: number, maxCost: number): { legs: Leg[]; cost: number; score: number } | null {
+  const priceShift = spot - baseSpot
+  const ask = (r: OptionRow) => surfacePrice(chain, r.strike, r.type, priceShift, true, baseSpot)
+  const bid = (r: OptionRow, move: number) => surfacePrice(chain, r.strike, r.type, priceShift + move, false, baseSpot)
+
+  let best: { legs: Leg[]; cost: number; score: number } | null = null
+  let bestScore = -Infinity
+  const n = otms.length
+
+  const search = (idx: number, chosen: number[]) => {
+    if (idx === n) {
+      let cost = ask(itm)
+      const legs: Leg[] = [{ strike: itm.strike, type: itm.type, quantity: 1, entryAsk: ask(itm), entryBid: bid(itm, 0) }]
+      for (let i = 0; i < n; i++) {
+        const q = chosen[i]; const r = otms[i]; const a = ask(r)
+        cost += q * a
+        legs.push({ strike: r.strike, type: r.type, quantity: q, entryAsk: a, entryBid: bid(r, 0) })
+      }
+      if (cost > maxCost) return
+      const pnLat = (move: number) => legs.reduce((s, l) => s + l.quantity * surfacePrice(chain, l.strike, l.type, priceShift + move, false, baseSpot), 0)
+      const pnl10 = pnLat(10) - cost
+      const pnlN10 = pnLat(-10) - cost
+      if (pnl10 <= 0 || pnlN10 <= 0) return
+      const sc = Math.min(pnl10, pnlN10) / (cost + 0.01) * 100
+      if (sc > bestScore) { bestScore = sc; best = { legs, cost, score: sc } }
+      return
+    }
+    for (let q = 1; q <= (idx === 0 ? 2 : 3); q++) { chosen.push(q); search(idx + 1, chosen); chosen.pop() }
+  }
+  search(0, [])
+  return best
+}
+
+function findBestCombo(chain: OptionRow[], baseSpot: number, spot: number, otmCount: number, maxCost: number): { legs: Leg[]; cost: number; score: number } | null {
+  const range = spot * 0.007
+  const calls = chain.filter(r => r.type === 'call' && r.strike > spot - range && r.strike < spot + range).sort((a, b) => a.strike - b.strike)
+  const puts = chain.filter(r => r.type === 'put' && r.strike < spot + range && r.strike > spot - range).sort((a, b) => a.strike - b.strike)
+
+  let best: { legs: Leg[]; cost: number; score: number } | null = null
+
+  for (const itm of calls.filter(r => r.strike < spot)) {
+    const otms = puts.filter(r => r.strike > spot)
+    for (const g of getConsecutiveGroups(otms, otmCount)) {
+      const r = evalCombo(itm, g, chain, baseSpot, spot, maxCost)
+      if (r && (!best || r.score > best.score)) best = r
+    }
+  }
+
+  for (const itm of puts.filter(r => r.strike > spot)) {
+    const otms = calls.filter(r => r.strike < spot)
+    for (const g of getConsecutiveGroups(otms, otmCount)) {
+      const r = evalCombo(itm, g, chain, baseSpot, spot, maxCost)
+      if (r && (!best || r.score > best.score)) best = r
+    }
+  }
+
+  return best
 }
 
 async function runBacktest(dates: string[], params: Params, onProgress: (pct: number, msg: string) => void): Promise<BacktestResult> {
@@ -186,39 +126,33 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
 
     const totalTicks = session.pricePath.length
     const baseSpot = session.pricePath[0].price
-    const iv = extractAtmIv(session.openingChain, baseSpot)
-    let openTrade: { trade: BacktestTrade; legs: Leg[]; entryTick: number; entrySpot: number } | null = null
+    let openTrade: { trade: BacktestTrade; legs: Leg[]; entryTick: number } | null = null
     let sessionPnl = 0
     let entered = false
 
     for (let tick = 0; tick < totalTicks; tick += params.scanInterval) {
       const spot = session.pricePath[tick].price
-      const priceShift = spot - baseSpot
-      const repriced = repriceChain(session.openingChain, spot, tick, totalTicks, iv)
-      const range = spot * 0.007
-      const calls = repriced.filter(r => r.type === 'call' && r.strike > spot - range && r.strike < spot + range).map(r => enhance(r, spot, iv))
-      const puts = repriced.filter(r => r.type === 'put' && r.strike < spot + range && r.strike > spot - range).map(r => enhance(r, spot, iv))
 
       if (!openTrade && !entered) {
-        const pos = generateOnce(calls, puts, spot, params.otmCount, params.maxCost, params.minScore, params.minCallDelta, params.minPutDelta)
+        const pos = findBestCombo(session.openingChain, baseSpot, spot, params.otmCount, params.maxCost)
         if (pos) {
           entered = true
-          const entryCost = pos.legs.reduce((s, l) => s + l.quantity * surfacePrice(session.openingChain, l.strike, l.type, priceShift, true, baseSpot), 0)
           const trade: BacktestTrade = {
             id: `${dates[di]}_${tick}`,
             date: dates[di], entryTick: tick, exitTick: tick,
             entryTime: session.pricePath[tick].time, exitTime: '',
-            legs: pos.legs, entryCost, exitValue: 0,
+            legs: pos.legs, entryCost: pos.cost, exitValue: 0,
             pnl: 0, pnlPct: 0, exitReason: '', score: pos.score,
           }
-          openTrade = { trade, legs: pos.legs, entryTick: tick, entrySpot: spot }
+          openTrade = { trade, legs: pos.legs, entryTick: tick }
         }
       }
 
       if (openTrade) {
         if (tick === openTrade.entryTick) continue
         const { trade, legs } = openTrade
-        const currentVal = legs.reduce((s, l) => s + l.quantity * surfacePrice(session.openingChain, l.strike, l.type, spot - baseSpot, false, baseSpot), 0)
+        const priceShift = spot - baseSpot
+        const currentVal = legs.reduce((s, l) => s + l.quantity * surfacePrice(session.openingChain, l.strike, l.type, priceShift, false, baseSpot), 0)
         const pnl = currentVal - trade.entryCost
 
         if (pnl >= params.tpPoints) {
@@ -291,8 +225,7 @@ function computeMaxDrawdown(equity: number[]): number {
 
 export default function BacktestTab({ sessions }: { sessions: { date: string; id: string }[] }) {
   const [params, setParams] = useState<Params>({
-    otmCount: 2, maxCost: 50, minScore: 0, minCallDelta: 0.5, minPutDelta: 0.5,
-    scanInterval: 5, tpPoints: 1, slPoints: 2,
+    otmCount: 2, maxCost: 50, scanInterval: 5, tpPoints: 1, slPoints: 2,
   })
   const [mode, setMode] = useState<'range' | 'pick'>('range')
   const [yearStart, setYearStart] = useState(2024)
@@ -339,7 +272,7 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
   return (
     <div className="space-y-4">
       <div className="bg-zgray/30 border border-zborder rounded-lg p-4">
-        <h3 className="text-sm font-medium text-ztextdim mb-3">Backtest: Delta-Neutral Strategy</h3>
+        <h3 className="text-sm font-medium text-ztextdim mb-3">Backtest: ±10 Profit Combo</h3>
 
         <div className="flex gap-2 mb-4">
           <button onClick={() => setMode('range')} className={`px-3 py-1 text-xs rounded ${mode === 'range' ? 'bg-zcyan/20 text-zcyan border border-zcyan' : 'text-ztextdim border border-zborder'}`}>Range</button>
@@ -350,9 +283,6 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <ParamInput label="OTM legs" value={params.otmCount} onChange={v => updateParam('otmCount', v)} min={2} max={3} />
             <ParamInput label="Max Cost (pts)" value={params.maxCost} onChange={v => updateParam('maxCost', v)} min={5} max={200} step={5} />
-            <ParamInput label="Min Score" value={params.minScore} onChange={v => updateParam('minScore', v)} min={0} max={50} step={1} />
-            <ParamInput label="Min Call Delta" value={params.minCallDelta} onChange={v => updateParam('minCallDelta', v)} min={0.1} max={0.95} step={0.05} />
-            <ParamInput label="Min Put Delta" value={params.minPutDelta} onChange={v => updateParam('minPutDelta', v)} min={0.1} max={0.95} step={0.05} />
             <ParamInput label="Scan Interval" value={params.scanInterval} onChange={v => updateParam('scanInterval', v)} min={1} max={20} step={1} />
             <ParamInput label="TP (pts)" value={params.tpPoints} onChange={v => updateParam('tpPoints', v)} min={0.5} max={10} step={0.5} />
             <ParamInput label="SL (pts)" value={params.slPoints} onChange={v => updateParam('slPoints', v)} min={0.5} max={10} step={0.5} />
@@ -369,9 +299,6 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <ParamInput label="OTM legs" value={params.otmCount} onChange={v => updateParam('otmCount', v)} min={2} max={3} />
               <ParamInput label="Max Cost (pts)" value={params.maxCost} onChange={v => updateParam('maxCost', v)} min={5} max={200} step={5} />
-              <ParamInput label="Min Score" value={params.minScore} onChange={v => updateParam('minScore', v)} min={0} max={50} step={1} />
-              <ParamInput label="Min Call Delta" value={params.minCallDelta} onChange={v => updateParam('minCallDelta', v)} min={0.1} max={0.95} step={0.05} />
-              <ParamInput label="Min Put Delta" value={params.minPutDelta} onChange={v => updateParam('minPutDelta', v)} min={0.1} max={0.95} step={0.05} />
               <ParamInput label="Scan Interval" value={params.scanInterval} onChange={v => updateParam('scanInterval', v)} min={1} max={20} step={1} />
               <ParamInput label="TP (pts)" value={params.tpPoints} onChange={v => updateParam('tpPoints', v)} min={0.5} max={10} step={0.5} />
               <ParamInput label="SL (pts)" value={params.slPoints} onChange={v => updateParam('slPoints', v)} min={0.5} max={10} step={0.5} />
