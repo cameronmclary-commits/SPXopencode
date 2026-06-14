@@ -100,11 +100,16 @@ function ChainTable({ title, rows, spot, color }: { title: string; rows: OptionR
               <th className="text-right px-3 py-2 font-medium">Mid</th>
               <th className="text-right px-3 py-2 font-medium">Vol</th>
               <th className="text-right px-3 py-2 font-medium">OI</th>
+              <th className="text-right px-3 py-2 font-medium">Delta</th>
+              <th className="text-right px-3 py-2 font-medium">Gamma</th>
+              <th className="text-right px-3 py-2 font-medium">Theta</th>
+              <th className="text-right px-3 py-2 font-medium">Vega</th>
+              <th className="text-right px-3 py-2 font-medium">IV</th>
             </tr>
           </thead>
           <tbody>
             {rows.map(r => {
-              const itm = r.strike > spot
+              const itm = r.type === 'call' ? r.strike < spot : r.strike > spot
               return (
                 <tr key={`${r.strike}-${r.type}`} className="border-b border-zborder/50 hover:bg-zgray/20 transition-colors">
                   <td className={`px-3 py-1.5 font-mono font-medium ${itm ? 'text-zgreen' : 'text-zred'}`}>
@@ -115,6 +120,11 @@ function ChainTable({ title, rows, spot, color }: { title: string; rows: OptionR
                   <td className="text-right px-3 py-1.5 font-mono">{r.mid.toFixed(2)}</td>
                   <td className="text-right px-3 py-1.5 font-mono">{r.volume.toLocaleString()}</td>
                   <td className="text-right px-3 py-1.5 font-mono">{r.openInterest.toLocaleString()}</td>
+                  <td className="text-right px-3 py-1.5 font-mono text-ztextdim">{r.delta != null ? r.delta.toFixed(3) : '—'}</td>
+                  <td className="text-right px-3 py-1.5 font-mono text-ztextdim">{r.gamma != null ? r.gamma.toFixed(4) : '—'}</td>
+                  <td className="text-right px-3 py-1.5 font-mono text-ztextdim">{r.theta != null ? r.theta.toFixed(2) : '—'}</td>
+                  <td className="text-right px-3 py-1.5 font-mono text-ztextdim">{r.vega != null ? r.vega.toFixed(3) : '—'}</td>
+                  <td className="text-right px-3 py-1.5 font-mono text-ztextdim">{r.iv != null ? (r.iv * 100).toFixed(1) + '%' : '—'}</td>
                 </tr>
               )
             })}

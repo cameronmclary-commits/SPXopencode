@@ -41,6 +41,11 @@ function buildSessionFromRows(rows, dateStr) {
       mid: r.mid || 0,
       volume: r.volume || 0,
       openInterest: r.open_int || 0,
+      delta: r.bsdelta != null ? Math.round(r.bsdelta * 1000) / 1000 : undefined,
+      gamma: r.bsgamma != null ? Math.round(r.bsgamma * 10000) / 10000 : undefined,
+      theta: r.bstheta != null ? Math.round(r.bstheta * 100) / 100 : undefined,
+      vega: r.bs_vega != null ? Math.round(r.bs_vega * 1000) / 1000 : undefined,
+      iv: r.bsiv != null ? Math.round(r.bsiv * 10000) / 10000 : undefined,
     });
   }
 

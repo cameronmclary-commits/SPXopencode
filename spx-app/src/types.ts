@@ -18,6 +18,11 @@ export interface OptionRow {
   volume: number
   openInterest: number
   conid?: number
+  delta?: number
+  gamma?: number
+  theta?: number
+  vega?: number
+  iv?: number
 }
 
 export interface SessionData {
