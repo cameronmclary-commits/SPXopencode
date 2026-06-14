@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { listSessions, loadDateParquet, warmCache } from './data-loader.js';
+import { listSessions, loadDateParquet, warmCache, fetchAvailableDates } from './data-loader.js';
 import * as ibkr from './ibkr-client.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -15,7 +15,13 @@ app.use(cors());
 
 app.use(express.static(STATIC_DIR));
 
-const sessionList = listSessions();
+let sessionList = listSessions();
+
+// Fetch available dates from GitHub on startup
+fetchAvailableDates().then(dates => {
+  sessionList = listSessions();
+  console.log(`Loaded ${sessionList.length} available dates`);
+});
 
 function buildSessionFromRows(rows, dateStr) {
   if (!rows || rows.length === 0) return null;
