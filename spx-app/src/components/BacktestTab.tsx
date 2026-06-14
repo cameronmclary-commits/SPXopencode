@@ -173,7 +173,7 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
 
     const totalTicks = session.pricePath.length
     const iv = extractAtmIv(session.openingChain, session.pricePath[0].price)
-    let openTrade: { trade: BacktestTrade; legs: Leg[] } | null = null
+    let openTrade: { trade: BacktestTrade; legs: Leg[]; entryTick: number } | null = null
     let sessionPnl = 0
     let entered = false
 
@@ -195,11 +195,12 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
             legs: pos.legs, entryCost: pos.cost, exitValue: 0,
             pnl: 0, pnlPct: 0, exitReason: '', score: pos.score,
           }
-          openTrade = { trade, legs: pos.legs }
+          openTrade = { trade, legs: pos.legs, entryTick: tick }
         }
       }
 
       if (openTrade) {
+        if (tick === openTrade.entryTick) continue
         const { trade, legs } = openTrade
         const currentVal = legs.reduce((s, l) => {
           const r = repriced.find(o => o.strike === l.strike && o.type === l.type)
