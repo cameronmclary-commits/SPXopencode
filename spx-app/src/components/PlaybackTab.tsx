@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import type { SessionInfo, ChainSnapshot, OptionRow } from '../types'
+import type { SessionInfo, ChainSnapshot } from '../types'
 import { usePlayback, type PlaybackSpeed } from '../hooks/usePlayback'
 import { findBestCombo } from '../utils/combos'
+import { surfacePrice } from '../utils/pricing'
 
 interface Props {
   sessions: SessionInfo[]
@@ -11,7 +12,10 @@ interface ScanParams {
   maxCost: number
   templateMove: number
   minPnl: number
-  minDelta: number
+  minSideDelta: number
+  minBalance: number
+  minGap: number
+  maxStep: number
 }
 
 interface SuggestedCombo {
@@ -35,21 +39,15 @@ interface PlaybackTrade {
   status: 'open' | 'closed'
 }
 
-function findOption(chain: OptionRow[], strike: number, type: string): OptionRow | undefined {
-  return chain.find(r => r.strike === strike && r.type === type)
-}
-
 function comboAskCost(combo: SuggestedCombo, snapshot: ChainSnapshot): number {
   return combo.legs.reduce((sum, leg) => {
-    const opt = findOption(snapshot.chain, leg.strike, leg.type)
-    return sum + leg.quantity * (opt?.ask ?? 0)
+    return sum + leg.quantity * surfacePrice(snapshot.chain, leg.strike, leg.type, 0, true)
   }, 0)
 }
 
 function comboBidValue(combo: SuggestedCombo, snapshot: ChainSnapshot): number {
   return combo.legs.reduce((sum, leg) => {
-    const opt = findOption(snapshot.chain, leg.strike, leg.type)
-    return sum + leg.quantity * (opt?.bid ?? 0)
+    return sum + leg.quantity * surfacePrice(snapshot.chain, leg.strike, leg.type, 0, false)
   }, 0)
 }
 
@@ -61,7 +59,10 @@ export default function PlaybackTab({ sessions }: Props) {
     maxCost: 50,
     templateMove: 10,
     minPnl: 0,
-    minDelta: 0.15,
+    minSideDelta: 0.5,
+    minBalance: 0.85,
+    minGap: 15,
+    maxStep: 10,
   })
   const [suggestions, setSuggestions] = useState<SuggestedCombo[]>([])
   const [trades, setTrades] = useState<PlaybackTrade[]>([])
@@ -84,9 +85,10 @@ export default function PlaybackTab({ sessions }: Props) {
   }, [selectedDate])
 
   useEffect(() => {
-    if (!pb.current) { setSuggestions([]); return }
-    const { spot, chain } = pb.current
-    const results = findBestCombo(chain, spot, params.maxCost, params.templateMove, params.minPnl, params.minDelta, 3)
+    const snap = pb.current
+    if (!snap) { setSuggestions([]); return }
+    const { spot, chain } = snap
+    const results = findBestCombo(chain, spot, params.maxCost, params.templateMove, params.minPnl, params.minSideDelta, params.minBalance, params.minGap, params.maxStep, 3)
     setSuggestions(results.map((r, i) => {
       const itmType = r.legs[0].type
       return {
@@ -101,7 +103,7 @@ export default function PlaybackTab({ sessions }: Props) {
         templatePts: params.templateMove,
       }
     }))
-  }, [pb.current, params, snapshots])
+  }, [pb.index, params, snapshots])
 
   // Auto-close open trades when playback reaches end
   useEffect(() => {
@@ -334,10 +336,28 @@ export default function PlaybackTab({ sessions }: Props) {
                         className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-full" step={0.1} />
                     </div>
                     <div>
-                      <label className="text-[10px] text-ztextdim tracking-wide uppercase">Min Delta</label>
-                      <input type="number" value={params.minDelta} onChange={e => updateParam('minDelta', Number(e.target.value))}
+                      <label className="text-[10px] text-ztextdim tracking-wide uppercase">Min Side Delta</label>
+                      <input type="number" value={params.minSideDelta} onChange={e => updateParam('minSideDelta', Number(e.target.value))}
                         onFocus={e => e.target.select()}
                         className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-full" step={0.05} />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-ztextdim tracking-wide uppercase">Min Balance</label>
+                      <input type="number" value={params.minBalance} onChange={e => updateParam('minBalance', Number(e.target.value))}
+                        onFocus={e => e.target.select()}
+                        className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-full" step={0.05} />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-ztextdim tracking-wide uppercase">Min Gap</label>
+                      <input type="number" value={params.minGap} onChange={e => updateParam('minGap', Number(e.target.value))}
+                        onFocus={e => e.target.select()}
+                        className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-full" step={5} />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-ztextdim tracking-wide uppercase">Max Step</label>
+                      <input type="number" value={params.maxStep} onChange={e => updateParam('maxStep', Number(e.target.value))}
+                        onFocus={e => e.target.select()}
+                        className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-full" step={1} />
                     </div>
                   </div>
 

@@ -95,12 +95,12 @@ export async function loadMinuteSnapshots(dateStr) {
     let bid = parseFloat(fields[9]);
     let ask = parseFloat(fields[10]);
 
-    if (!(bid > 0 && ask > 0)) {
+    if (!(bid > 0 && ask > 0) || bid === 22 || ask === 22) {
       const b = parseFloat(fields[13]);
       const a = parseFloat(fields[14]);
-      if (b > 0 && a > 0) { bid = b; ask = a; }
+      if (b > 0 && a > 0 && b !== 22 && a !== 22) { bid = b; ask = a; }
     }
-    if (!(bid > 0 && ask > 0)) continue;
+    if (!(bid > 0 && ask > 0) || bid === 22 || ask === 22) continue;
 
     let snap = snapshots.get(minuteKey);
     if (!snap) {

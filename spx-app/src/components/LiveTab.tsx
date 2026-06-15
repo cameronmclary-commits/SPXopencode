@@ -25,8 +25,8 @@ interface OpenTrade {
   entryTp: number; entrySl: number
 }
 
-function findSuggestions(chain: OptionRow[], spot: number, maxCost: number, templateMove: number, minPnl: number, minDelta: number): SuggestedTrade[] {
-  const results = findBestCombo(chain, spot, maxCost, templateMove, minPnl, minDelta, 10)
+function findSuggestions(chain: OptionRow[], spot: number, maxCost: number, templateMove: number, minPnl: number, minSideDelta: number, minBalance: number, minGap: number, maxStep: number): SuggestedTrade[] {
+  const results = findBestCombo(chain, spot, maxCost, templateMove, minPnl, minSideDelta, minBalance, minGap, maxStep, 10)
   return results.slice(0, 3).map((r, i) => ({
     id: `sug_${i}_${Date.now()}`,
     legs: r.legs,
@@ -82,7 +82,10 @@ export default function LiveTab({ sessions }: { sessions?: SessionInfo[] }) {
   const [sessionEnd, setSessionEnd] = useState('16:00')
   const [templateMove, setTemplateMove] = useState(10)
   const [minPnl, setMinPnl] = useState(0)
-  const [minDelta, setMinDelta] = useState(0)
+  const [minSideDelta, setMinSideDelta] = useState(0.5)
+  const [minBalance, setMinBalance] = useState(0.85)
+  const [minGap, setMinGap] = useState(15)
+  const [maxStep, setMaxStep] = useState(10)
   const [maxCost, setMaxCost] = useState(20)
   const [tpPoints, setTpPoints] = useState(3)
   const [slPoints, setSlPoints] = useState(1.5)
@@ -139,7 +142,7 @@ export default function LiveTab({ sessions }: { sessions?: SessionInfo[] }) {
     const priceShift = spot - baseSpot
     const idsToClose: string[] = []
     const updated = openTrades.map(t => {
-      const val = t.legs.reduce((sum, l) => sum + l.quantity * surfacePrice(chain, l.strike, l.type, priceShift, false, spot), 0)
+      const val = t.legs.reduce((sum, l) => sum + l.quantity * surfacePrice(chain, l.strike, l.type, priceShift, false), 0)
       const pnl = val - t.entryCost
       const pnlPct = t.entryCost > 0 ? (pnl / t.entryCost) * 100 : 0
       if (t.entryTp > 0 && pnl >= t.entryTp) idsToClose.push(t.id)
@@ -186,9 +189,9 @@ export default function LiveTab({ sessions }: { sessions?: SessionInfo[] }) {
 
   useEffect(() => {
     if (chain.length === 0 || spot === 0) return
-    const all = findSuggestions(chain, spot, maxCost, templateMove, minPnl, minDelta)
+    const all = findSuggestions(chain, spot, maxCost, templateMove, minPnl, minSideDelta, minBalance, minGap, maxStep)
     setSuggestions(all.filter(s => !rejectedIds.has(s.id)))
-  }, [chain, spot, maxCost, templateMove, minPnl, minDelta, rejectedIds])
+  }, [chain, spot, maxCost, templateMove, minPnl, minSideDelta, minBalance, minGap, maxStep, rejectedIds])
 
   useEffect(() => {
     if (openTrades.length === 0 || chain.length === 0) return
@@ -200,7 +203,7 @@ export default function LiveTab({ sessions }: { sessions?: SessionInfo[] }) {
       const idsToClose: string[] = []
       const updated = openTradesRef.current.map(t => {
         const priceShift = s - t.entrySpot
-        const val = t.legs.reduce((sum, l) => sum + l.quantity * surfacePrice(c, l.strike, l.type, priceShift, false, s), 0)
+        const val = t.legs.reduce((sum, l) => sum + l.quantity * surfacePrice(c, l.strike, l.type, priceShift, false), 0)
         const pnl = val - t.entryCost
         const pnlPct = t.entryCost > 0 ? (pnl / t.entryCost) * 100 : 0
 
@@ -472,7 +475,10 @@ export default function LiveTab({ sessions }: { sessions?: SessionInfo[] }) {
           <ParamInput label="Max Cost" value={maxCost} onChange={setMaxCost} min={5} max={200} step={5} />
           <ParamInput label="Template" value={templateMove} onChange={setTemplateMove} min={5} max={20} step={2.5} />
           <ParamInput label="Min P&L" value={minPnl} onChange={setMinPnl} min={0} max={5} step={0.1} />
-          <ParamInput label="Min Delta" value={minDelta} onChange={setMinDelta} min={0} max={1} step={0.05} />
+          <ParamInput label="Min Side Delta" value={minSideDelta} onChange={setMinSideDelta} min={0} max={1} step={0.05} />
+          <ParamInput label="Min Balance" value={minBalance} onChange={setMinBalance} min={0} max={1} step={0.05} />
+          <ParamInput label="Min Gap" value={minGap} onChange={setMinGap} min={0} max={50} step={5} />
+          <ParamInput label="Max Step" value={maxStep} onChange={setMaxStep} min={1} max={50} step={1} />
           <ParamInput label="TP (pts)" value={tpPoints} onChange={setTpPoints} min={0} max={20} step={0.5} />
           <ParamInput label="SL (pts)" value={slPoints} onChange={setSlPoints} min={0} max={10} step={0.5} />
           <div>

@@ -6,17 +6,12 @@ export function surfacePrice(
   type: 'call' | 'put',
   priceShift: number,
   useAsk: boolean,
-  entrySpot: number,
 ): number {
   const shifted = strike - priceShift
   const same = chain.filter(r => r.type === type).sort((a, b) => a.strike - b.strike)
   const getPrice = (r: OptionRow) => useAsk ? r.ask : r.bid
 
-  if (same.length === 0) {
-    return Math.max(0.01, type === 'call'
-      ? entrySpot + priceShift - strike
-      : strike - (entrySpot + priceShift))
-  }
+  if (same.length === 0) return 0.01
   if (shifted <= same[0].strike) return Math.max(0.01, getPrice(same[0]))
   if (shifted >= same[same.length - 1].strike) return Math.max(0.01, getPrice(same[same.length - 1]))
 
@@ -34,10 +29,9 @@ export function surfaceMid(
   strike: number,
   type: 'call' | 'put',
   priceShift: number,
-  baseSpot: number,
 ): number {
-  const bid = surfacePrice(chain, strike, type, priceShift, false, baseSpot)
-  const ask = surfacePrice(chain, strike, type, priceShift, true, baseSpot)
+  const bid = surfacePrice(chain, strike, type, priceShift, false)
+  const ask = surfacePrice(chain, strike, type, priceShift, true)
   return (bid + ask) / 2
 }
 
@@ -49,8 +43,8 @@ export function numericDelta(
   baseSpot: number,
 ): number {
   const ps = spot - baseSpot
-  const up = surfaceMid(chain, strike, type, ps + 1, baseSpot)
-  const dn = surfaceMid(chain, strike, type, ps - 1, baseSpot)
+  const up = surfaceMid(chain, strike, type, ps + 1)
+  const dn = surfaceMid(chain, strike, type, ps - 1)
   return (up - dn) / 2
 }
 

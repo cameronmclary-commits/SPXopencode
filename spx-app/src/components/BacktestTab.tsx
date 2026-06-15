@@ -1,10 +1,10 @@
 import { useState, useRef, useMemo, useCallback } from 'react'
-import type { SessionData, OptionRow, ChainSnapshot } from '../types'
+import type { SessionData, ChainSnapshot } from '../types'
 import { fetchSession } from '../api'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, ReferenceLine } from 'recharts'
-import { getConsecutiveGroups } from '../utils/pricing'
-import { type ComboLeg, evalCombo } from '../utils/combos'
-import { ParamInput, TimeInput, MetricCard } from './shared/UI'
+import { surfacePrice } from '../utils/pricing'
+import { findBestCombo, type ComboLeg } from '../utils/combos'
+import { ParamInput, MetricCard } from './shared/UI'
 
 interface BacktestTrade {
   id: string; date: string; entryTick: number; exitTick: number
@@ -26,48 +26,12 @@ interface BacktestResult {
 
 interface Params {
   maxCost: number; scanInterval: number; tpPoints: number; slPoints: number
-  templateMove: number; minPnl: number; minDelta: number
-  sessionStart: string; sessionEnd: string
+  templateMove: number; minPnl: number; minSideDelta: number; minBalance: number; minGap: number; maxStep: number
 }
 
-function timeInRange(t: string, start: string, end: string): boolean {
-  return t >= start && t <= end
-}
 function timeToMinutes(t: string): number {
   const [h, m] = t.split(':').map(Number)
   return h * 60 + m
-}
-
-function optBid(chain: OptionRow[], strike: number, type: string): number {
-  return chain.find(r => r.strike === strike && r.type === type)?.bid ?? 0
-}
-
-function findBestCombo(chain: OptionRow[], spot: number, maxCost: number, templateMove: number, minPnl: number, minDelta: number): { legs: ComboLeg[]; cost: number; score: number } | null {
-  const range = spot * 0.007
-  const calls = chain.filter(r => r.type === 'call' && r.strike > spot - range && r.strike < spot + range).sort((a, b) => a.strike - b.strike)
-  const puts = chain.filter(r => r.type === 'put' && r.strike < spot + range && r.strike > spot - range).sort((a, b) => a.strike - b.strike)
-
-  let best: { legs: ComboLeg[]; cost: number; score: number } | null = null
-
-  for (const otmCount of [2, 3]) {
-    for (const itm of calls.filter(r => r.strike < spot)) {
-      const otms = puts.filter(r => r.strike > itm.strike && r.strike < spot)
-      for (const g of getConsecutiveGroups(otms, otmCount)) {
-        const r = evalCombo(itm, g, chain, spot, maxCost, templateMove, minPnl, minDelta)
-        if (r && (!best || r.score > best.score)) best = r
-      }
-    }
-
-    for (const itm of puts.filter(r => r.strike > spot)) {
-      const otms = calls.filter(r => r.strike < itm.strike && r.strike > spot)
-      for (const g of getConsecutiveGroups(otms, otmCount)) {
-        const r = evalCombo(itm, g, chain, spot, maxCost, templateMove, minPnl, minDelta)
-        if (r && (!best || r.score > best.score)) best = r
-      }
-    }
-  }
-
-  return best
 }
 
 async function runBacktest(dates: string[], params: Params, onProgress: (u: { pct: number; msg: string; cumPnl: number; trades: BacktestTrade[]; equityCurve: { tick: number; pnl: number }[] }) => void): Promise<BacktestResult> {
@@ -98,8 +62,9 @@ async function runBacktest(dates: string[], params: Params, onProgress: (u: { pc
       const tickMin = timeToMinutes(tickTime)
       const chain = snapshots[tick]?.chain || session.openingChain
 
-      if (!openTrade && !tradeTakenThisDay && tickMin >= nextScanMin && timeInRange(tickTime, params.sessionStart, params.sessionEnd)) {
-        const pos = findBestCombo(chain, spot, params.maxCost, params.templateMove, params.minPnl, params.minDelta)
+      if (!openTrade && !tradeTakenThisDay && tickMin >= nextScanMin) {
+        const results = findBestCombo(chain, spot, params.maxCost, params.templateMove, params.minPnl, params.minSideDelta, params.minBalance, params.minGap, params.maxStep)
+        const pos = results[0]
         if (pos) {
           const trade: BacktestTrade = {
             id: `${dates[di]}_${tick}`,
@@ -117,7 +82,7 @@ async function runBacktest(dates: string[], params: Params, onProgress: (u: { pc
       if (openTrade) {
         if (tick === openTrade.entryTick) continue
         const { trade, legs } = openTrade
-        const currentVal = legs.reduce((s, l) => s + l.quantity * optBid(chain, l.strike, l.type), 0)
+        const currentVal = legs.reduce((s, l) => s + l.quantity * surfacePrice(chain, l.strike, l.type, 0, false), 0)
         const pnl = currentVal - trade.entryCost
 
         if (pnl >= params.tpPoints) {
@@ -148,7 +113,7 @@ async function runBacktest(dates: string[], params: Params, onProgress: (u: { pc
       const { trade, legs } = openTrade
       const finalTick = totalTicks - 1
       const finalChain = snapshots[finalTick]?.chain || session.openingChain
-      const finalVal = legs.reduce((s, l) => s + l.quantity * optBid(finalChain, l.strike, l.type), 0)
+      const finalVal = legs.reduce((s, l) => s + l.quantity * surfacePrice(finalChain, l.strike, l.type, 0, false), 0)
       trade.exitTick = finalTick; trade.exitTime = session.pricePath[finalTick].time
       trade.exitValue = finalVal; trade.pnl = finalVal - trade.entryCost
       trade.pnlPct = trade.entryCost > 0 ? (trade.pnl / trade.entryCost) * 100 : 0
@@ -196,8 +161,7 @@ function computeMaxDrawdown(equity: number[]): number {
 
 export default function BacktestTab({ sessions }: { sessions: { date: string; id: string }[] }) {
   const [params, setParams] = useState<Params>({
-    maxCost: 50, scanInterval: 5, tpPoints: 1, slPoints: 2, templateMove: 10, minPnl: 0, minDelta: 0,
-    sessionStart: '09:30', sessionEnd: '16:00',
+    maxCost: 50, scanInterval: 5, tpPoints: 1, slPoints: 2, templateMove: 10, minPnl: 0, minSideDelta: 0.5, minBalance: 0.85, minGap: 15, maxStep: 10,
   })
   const [mode, setMode] = useState<'range' | 'pick'>('range')
   const [selectedDates, setSelectedDates] = useState<Set<string>>(new Set())
@@ -258,9 +222,10 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
             <ParamInput label="SL (pts)" value={params.slPoints} onChange={v => updateParam('slPoints', v)} min={0.5} max={10} step={0.5} />
             <ParamInput label="Template (pts)" value={params.templateMove} onChange={v => updateParam('templateMove', v)} min={5} max={20} step={2.5} />
             <ParamInput label="Min P&L (pts)" value={params.minPnl} onChange={v => updateParam('minPnl', v)} min={0} max={5} step={0.1} />
-            <ParamInput label="Min Delta" value={params.minDelta} onChange={v => updateParam('minDelta', v)} min={0} max={1} step={0.05} />
-            <TimeInput label="Session Start" value={params.sessionStart} onChange={v => updateParam('sessionStart', v)} />
-            <TimeInput label="Session End" value={params.sessionEnd} onChange={v => updateParam('sessionEnd', v)} />
+            <ParamInput label="Min Side Delta" value={params.minSideDelta} onChange={v => updateParam('minSideDelta', v)} min={0} max={1} step={0.05} />
+            <ParamInput label="Min Balance" value={params.minBalance} onChange={v => updateParam('minBalance', v)} min={0} max={1} step={0.05} />
+            <ParamInput label="Min Gap" value={params.minGap} onChange={v => updateParam('minGap', v)} min={0} max={50} step={5} />
+            <ParamInput label="Max Step" value={params.maxStep} onChange={v => updateParam('maxStep', v)} min={1} max={50} step={1} />
             <div className="flex items-center gap-2">
               <label className="text-xs text-ztextdim">Dates:</label>
               <span className="text-xs font-mono text-ztext">{allDates.length} available (all 0DTE)</span>
@@ -277,9 +242,10 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
             <div className="flex flex-wrap gap-3 mt-2">
               <ParamInput label="Template (pts)" value={params.templateMove} onChange={v => updateParam('templateMove', v)} min={5} max={20} step={2.5} />
               <ParamInput label="Min P&L (pts)" value={params.minPnl} onChange={v => updateParam('minPnl', v)} min={0} max={5} step={0.1} />
-              <ParamInput label="Min Delta" value={params.minDelta} onChange={v => updateParam('minDelta', v)} min={0} max={1} step={0.05} />
-              <TimeInput label="Session Start" value={params.sessionStart} onChange={v => updateParam('sessionStart', v)} />
-              <TimeInput label="Session End" value={params.sessionEnd} onChange={v => updateParam('sessionEnd', v)} />
+            <ParamInput label="Min Side Delta" value={params.minSideDelta} onChange={v => updateParam('minSideDelta', v)} min={0} max={1} step={0.05} />
+            <ParamInput label="Min Balance" value={params.minBalance} onChange={v => updateParam('minBalance', v)} min={0} max={1} step={0.05} />
+            <ParamInput label="Min Gap" value={params.minGap} onChange={v => updateParam('minGap', v)} min={0} max={50} step={5} />
+            <ParamInput label="Max Step" value={params.maxStep} onChange={v => updateParam('maxStep', v)} min={1} max={50} step={1} />
             </div>
             <div className="mt-3 flex flex-wrap gap-2 items-center">
               <span className="text-xs text-ztextdim">Select dates ({selectedDates.size} of {sessions.length}):</span>

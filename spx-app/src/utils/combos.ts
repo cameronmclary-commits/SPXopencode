@@ -26,10 +26,13 @@ export function evalCombo(
   maxCost: number,
   templateMove: number,
   minPnl: number,
-  minDelta: number,
+  minSideDelta: number,
+  minBalance: number,
+  minGap: number,
+  maxStep: number,
 ): ComboResult | null {
-  const ask = (r: OptionRow) => surfacePrice(chain, r.strike, r.type, 0, true, spot)
-  const bid = (r: OptionRow, move: number) => surfacePrice(chain, r.strike, r.type, move, false, spot)
+  const ask = (r: OptionRow) => surfacePrice(chain, r.strike, r.type, 0, true)
+  const bid = (r: OptionRow, move: number) => surfacePrice(chain, r.strike, r.type, move, false)
 
   let best: ComboResult | null = null
   let bestScore = -Infinity
@@ -51,19 +54,32 @@ export function evalCombo(
         })
       }
       if (cost > maxCost) return
-      if (minDelta > 0) {
-        for (const l of legs) {
-          if (Math.abs(numericDelta(chain, l.strike, l.type, spot, spot)) < minDelta) return
-        }
+      let callDelta = 0, putDelta = 0
+      for (const l of legs) {
+        const d = numericDelta(chain, l.strike, l.type, spot, spot)
+        if (l.type === 'call') callDelta += d
+        else putDelta += Math.abs(d)
+      }
+      if (Math.min(callDelta, putDelta) < minSideDelta) return
+      if (minBalance > 0) {
+        const minSide = Math.min(callDelta, putDelta)
+        const maxSide = Math.max(callDelta, putDelta)
+        if (maxSide > 0 && minSide / maxSide < minBalance) return
+      }
+      if (minGap > 0) {
+        const avgOtm = otms.reduce((s, r) => s + r.strike, 0) / otms.length
+        const gap = itm.type === 'call' ? avgOtm - itm.strike : itm.strike - avgOtm
+        if (gap < minGap) return
       }
       const pnLat = (move: number) => legs.reduce(
-        (s, l) => s + l.quantity * surfacePrice(chain, l.strike, l.type, move, false, spot), 0
+        (s, l) => s + l.quantity * surfacePrice(chain, l.strike, l.type, move, false), 0
       )
       const pnlPos = pnLat(templateMove) - cost
       const pnlNeg = pnLat(-templateMove) - cost
       if (pnlPos < minPnl || pnlNeg < minPnl) return
-      const sc = Math.min(pnlPos, pnlNeg) / (cost + 0.01) * 100
-      if (sc > bestScore) {
+      if (maxStep > 0 && templateMove / Math.min(pnlPos, pnlNeg) > maxStep) return
+      const sc = Math.min(pnlPos, pnlNeg)
+      if (sc > bestScore || (sc === bestScore && cost < (best?.cost ?? Infinity))) {
         bestScore = sc
         best = { legs, cost, score: sc, pnlPos, pnlNeg }
       }
@@ -85,7 +101,10 @@ export function findBestCombo(
   maxCost: number,
   templateMove: number,
   minPnl: number,
-  minDelta: number,
+  minSideDelta: number,
+  minBalance: number,
+  minGap: number,
+  maxStep: number,
   maxResults: number = 1,
 ): ComboResult[] {
   const range = spot * 0.007
@@ -95,22 +114,20 @@ export function findBestCombo(
     .sort((a, b) => a.strike - b.strike)
   const results: ComboResult[] = []
 
-  for (const otmCount of [2, 3]) {
-    for (const itm of calls.filter(r => r.strike < spot)) {
-      const otms = puts.filter(r => r.strike > itm.strike && r.strike < spot)
-      if (otms.length < otmCount) continue
-      for (const g of getConsecutiveGroups(otms, otmCount)) {
-        const r = evalCombo(itm, g, chain, spot, maxCost, templateMove, minPnl, minDelta)
-        if (r) results.push(r)
-      }
+  for (const itm of calls.filter(r => r.strike < spot)) {
+    const otms = puts.filter(r => r.strike > itm.strike && r.strike < spot)
+    if (otms.length < 2) continue
+    for (const g of getConsecutiveGroups(otms, 2)) {
+      const r = evalCombo(itm, g, chain, spot, maxCost, templateMove, minPnl, minSideDelta, minBalance, minGap, maxStep)
+      if (r) results.push(r)
     }
-    for (const itm of puts.filter(r => r.strike > spot)) {
-      const otms = calls.filter(r => r.strike < itm.strike && r.strike > spot)
-      if (otms.length < otmCount) continue
-      for (const g of getConsecutiveGroups(otms, otmCount)) {
-        const r = evalCombo(itm, g, chain, spot, maxCost, templateMove, minPnl, minDelta)
-        if (r) results.push(r)
-      }
+  }
+  for (const itm of puts.filter(r => r.strike > spot)) {
+    const otms = calls.filter(r => r.strike < itm.strike && r.strike > spot)
+    if (otms.length < 2) continue
+    for (const g of getConsecutiveGroups(otms, 2)) {
+      const r = evalCombo(itm, g, chain, spot, maxCost, templateMove, minPnl, minSideDelta, minBalance, minGap, maxStep)
+      if (r) results.push(r)
     }
   }
 

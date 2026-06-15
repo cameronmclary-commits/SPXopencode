@@ -1,6 +1,8 @@
 import { useState, useMemo } from 'react'
 import type { OptionRow } from '../types'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts'
+import { findBestCombo, type ComboLeg } from '../utils/combos'
+import { surfacePrice } from '../utils/pricing'
 
 interface Props {
   date: string
@@ -8,148 +10,49 @@ interface Props {
   spotPrice: number
 }
 
-interface Leg {
+interface ScenarioLeg {
   strike: number; type: 'call' | 'put'; quantity: number
   entryAsk: number; entryBid: number
 }
 
 interface Position {
   id: string
-  callLegs: Leg[]; putLegs: Leg[]
+  callLegs: ScenarioLeg[]; putLegs: ScenarioLeg[]
   totalCost: number
   scenarios: { move: number; pnl: number }[]
   minPnl: number; maxPnl: number
   score: number
 }
 
-function chainSurfacePrice(chain: OptionRow[], strike: number, type: 'call' | 'put', priceShift: number, useAsk: boolean, entrySpot: number): number {
-  const shifted = strike - priceShift
-  const same = chain.filter(r => r.type === type).sort((a, b) => a.strike - b.strike)
-  const getPrice = (r: OptionRow) => useAsk ? r.ask : r.bid
-  if (same.length === 0) return Math.max(0.01, type === 'call' ? entrySpot + priceShift - strike : strike - (entrySpot + priceShift))
-  if (shifted <= same[0].strike) return Math.max(0.01, getPrice(same[0]))
-  if (shifted >= same[same.length - 1].strike) return Math.max(0.01, getPrice(same[same.length - 1]))
-  let lo = 0, hi = same.length - 1
-  while (hi - lo > 1) { const m = Math.floor((lo + hi) / 2); if (same[m].strike < shifted) lo = m; else hi = m }
-  const t = (shifted - same[lo].strike) / (same[hi].strike - same[lo].strike)
-  return getPrice(same[lo]) + t * (getPrice(same[hi]) - getPrice(same[lo]))
+function computeScenarios(legs: ComboLeg[], chain: OptionRow[], cost: number) {
+  const moves = [-15, -10, -7.5, -5, -2.5, 0, 2.5, 5, 7.5, 10, 15]
+  return moves.map(move => {
+    const pnl = legs.reduce((s, l) => {
+      return s + l.quantity * surfacePrice(chain, l.strike, l.type, move, false)
+    }, 0) - cost
+    return { move, pnl }
+  })
 }
 
-function chainSurfaceMid(chain: OptionRow[], strike: number, type: 'call' | 'put', priceShift: number, baseSpot: number): number {
-  const bid = chainSurfacePrice(chain, strike, type, priceShift, false, baseSpot)
-  const ask = chainSurfacePrice(chain, strike, type, priceShift, true, baseSpot)
-  return (bid + ask) / 2
-}
-
-function numericDelta(chain: OptionRow[], strike: number, type: 'call' | 'put', spot: number, baseSpot: number): number {
-  const ps = spot - baseSpot
-  const up = chainSurfaceMid(chain, strike, type, ps + 1, baseSpot)
-  const dn = chainSurfaceMid(chain, strike, type, ps - 1, baseSpot)
-  return (up - dn) / 2
-}
-
-function getConsecutiveGroups<T extends { strike: number }>(arr: T[], k: number): T[][] {
-  if (arr.length < k) return []
-  const sorted = [...arr].sort((a, b) => a.strike - b.strike)
-  const result: T[][] = []
-  for (let i = 0; i <= sorted.length - k; i++) {
-    const g = sorted.slice(i, i + k)
-    const ok = g.every((_, j) => j === 0 || Math.abs(g[j].strike - g[j - 1].strike) === 5 || Math.abs(g[j].strike - g[j - 1].strike) === 0)
-    if (ok) result.push(g)
-  }
-  return result
-}
-
-function generateStructuredPosition(
-  itmRow: OptionRow,
-  otmRows: OptionRow[],
-  chain: OptionRow[],
-  spot: number,
-  templateMove: number,
-  minPnl: number,
-  minDelta: number,
-): Position | null {
-  const nOtm = otmRows.length
-  let bestCallLegs: Leg[] = []
-  let bestPutLegs: Leg[] = []
-  let bestCost = 0
-  let bestScore = -Infinity
-
-  const ask = (r: OptionRow) => chainSurfacePrice(chain, r.strike, r.type, 0, true, spot)
-  const pnLat = (legs: Leg[], move: number) => legs.reduce((s, l) => s + l.quantity * chainSurfacePrice(chain, l.strike, l.type, move, false, spot), 0)
-
-  const search = (idx: number, chosen: number[]) => {
-    if (idx === nOtm) {
-      const callLegs: Leg[] = []
-      const putLegs: Leg[] = []
-      let cost = ask(itmRow)
-      const itmLeg: Leg = { strike: itmRow.strike, type: itmRow.type, quantity: 1, entryAsk: cost, entryBid: chainSurfacePrice(chain, itmRow.strike, itmRow.type, 0, false, spot) }
-      ;(itmRow.type === 'call' ? callLegs : putLegs).push(itmLeg)
-      for (let i = 0; i < nOtm; i++) {
-        const q = chosen[i]; const r = otmRows[i]; const a = ask(r)
-        cost += q * a
-        const leg: Leg = { strike: r.strike, type: r.type, quantity: q, entryAsk: a, entryBid: chainSurfacePrice(chain, r.strike, r.type, 0, false, spot) }
-        ;(r.type === 'call' ? callLegs : putLegs).push(leg)
-      }
-      const legs = [...callLegs, ...putLegs]
-      if (minDelta > 0) {
-        for (const l of legs) {
-          if (Math.abs(numericDelta(chain, l.strike, l.type, spot, spot)) < minDelta) return
-        }
-      }
-      const pnlPos = pnLat(legs, templateMove) - cost
-      const pnlNeg = pnLat(legs, -templateMove) - cost
-      if (pnlPos < minPnl || pnlNeg < minPnl) return
-      const half = templateMove / 2
-      const pnlHalfPos = pnLat(legs, half) - cost
-      const pnlHalfNeg = pnLat(legs, -half) - cost
-      const sc = Math.min(pnlPos, pnlNeg) / (cost + 0.01) * 100 + (pnlHalfPos > 0 && pnlHalfNeg > 0 ? 5 : 0)
-      if (sc > bestScore) { bestCallLegs = callLegs; bestPutLegs = putLegs; bestCost = cost; bestScore = sc }
-      return
-    }
-    for (let q = 1; q <= (idx === 0 ? 2 : 3); q++) { chosen.push(q); search(idx + 1, chosen); chosen.pop() }
-  }
-  search(0, [])
-  if (bestScore === -Infinity) return null
-  const legs = [...bestCallLegs, ...bestPutLegs]
-  const scenarios = [-15, -10, -7.5, -5, -2.5, 0, 2.5, 5, 7.5, 10, 15].map(move => ({ move, pnl: pnLat(legs, move) - bestCost }))
+function resultToPosition(r: { legs: ComboLeg[]; cost: number; score: number }, chain: OptionRow[]): Position {
+  const callLegs = r.legs.filter(l => l.type === 'call').map(l => ({
+    strike: l.strike, type: l.type as 'call', quantity: l.quantity,
+    entryAsk: l.entryAsk, entryBid: l.entryBid,
+  }))
+  const putLegs = r.legs.filter(l => l.type === 'put').map(l => ({
+    strike: l.strike, type: l.type as 'put', quantity: l.quantity,
+    entryAsk: l.entryAsk, entryBid: l.entryBid,
+  }))
+  const scenarios = computeScenarios(r.legs, chain, r.cost)
   const pnls = scenarios.map(s => s.pnl)
+  const itm = callLegs.length === 1 ? callLegs[0] : putLegs[0]
   return {
-    id: `${itmRow.type === 'call' ? 'C' : 'P'}${itmRow.strike.toFixed(0)}_${nOtm}otm`,
-    callLegs: bestCallLegs, putLegs: bestPutLegs,
-    totalCost: bestCost,
+    id: `${itm.type === 'call' ? 'C' : 'P'}${itm.strike.toFixed(0)}_${r.legs.length - 1}otm`,
+    callLegs, putLegs,
+    totalCost: r.cost,
     scenarios, minPnl: Math.min(...pnls), maxPnl: Math.max(...pnls),
-    score: bestScore,
+    score: r.score,
   }
-}
-
-function generatePositions(chain: OptionRow[], spot: number, maxResults: number, templateMove: number, minPnl: number, minDelta: number): Position[] {
-  const range = spot * 0.007
-  const calls = chain.filter(r => r.type === 'call' && r.strike > spot - range && r.strike < spot + range).sort((a, b) => a.strike - b.strike)
-  const puts = chain.filter(r => r.type === 'put' && r.strike < spot + range && r.strike > spot - range).sort((a, b) => a.strike - b.strike)
-  const results: Position[] = []
-
-  for (const otmCount of [2, 3]) {
-    for (const itm of calls.filter(r => r.strike < spot)) {
-      const otms = puts.filter(r => r.strike > spot)
-      if (otms.length < otmCount) continue
-      for (const g of getConsecutiveGroups(otms, otmCount)) {
-        const pos = generateStructuredPosition(itm, g, chain, spot, templateMove, minPnl, minDelta)
-        if (pos) results.push(pos)
-      }
-    }
-
-    for (const itm of puts.filter(r => r.strike > spot)) {
-      const otms = calls.filter(r => r.strike < spot)
-      if (otms.length < otmCount) continue
-      for (const g of getConsecutiveGroups(otms, otmCount)) {
-        const pos = generateStructuredPosition(itm, g, chain, spot, templateMove, minPnl, minDelta)
-        if (pos) results.push(pos)
-      }
-    }
-  }
-
-  return results.sort((a, b) => b.score - a.score).slice(0, maxResults)
 }
 
 export default function TradeScanner({ date, chain, spotPrice }: Props) {
@@ -157,14 +60,17 @@ export default function TradeScanner({ date, chain, spotPrice }: Props) {
   const [maxCostFilter, setMaxCostFilter] = useState(20)
   const [templateMove, setTemplateMove] = useState(10)
   const [minPnl, setMinPnl] = useState(0)
-  const [minDelta, setMinDelta] = useState(0)
+  const [minSideDelta, setMinSideDelta] = useState(0.5)
+  const [minBalance, setMinBalance] = useState(0.85)
+  const [minGap, setMinGap] = useState(15)
+  const [maxStep, setMaxStep] = useState(10)
   const [selectedPos, setSelectedPos] = useState<string | null>(null)
 
   const positions = useMemo(() => {
     if (!spotPrice || chain.length === 0) return []
-    const results = generatePositions(chain, spotPrice, maxResults * 5, templateMove, minPnl, minDelta)
-    return results.filter(p => p.totalCost <= maxCostFilter).slice(0, maxResults)
-  }, [chain, spotPrice, maxResults, maxCostFilter, templateMove, minPnl, minDelta])
+    const results = findBestCombo(chain, spotPrice, maxCostFilter, templateMove, minPnl, minSideDelta, minBalance, minGap, maxStep, maxResults * 5)
+    return results.map(r => resultToPosition(r, chain)).slice(0, maxResults)
+  }, [chain, spotPrice, maxResults, maxCostFilter, templateMove, minPnl, minSideDelta, minBalance, minGap, maxStep])
 
   const selected = positions.find(p => p.id === selectedPos)
 
@@ -201,8 +107,20 @@ export default function TradeScanner({ date, chain, spotPrice }: Props) {
             <input type="number" value={minPnl} onChange={e => setMinPnl(Number(e.target.value))} onFocus={e => e.target.select()} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.1} min={0} max={5} />
           </div>
           <div className="flex items-center gap-2">
-            <label className="text-xs text-ztextdim">Min Delta:</label>
-            <input type="number" value={minDelta} onChange={e => setMinDelta(Number(e.target.value))} onFocus={e => e.target.select()} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.05} min={0} max={1} />
+            <label className="text-xs text-ztextdim">Min Side Delta:</label>
+            <input type="number" value={minSideDelta} onChange={e => setMinSideDelta(Number(e.target.value))} onFocus={e => e.target.select()} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.05} min={0} max={1} />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-ztextdim">Min Balance:</label>
+            <input type="number" value={minBalance} onChange={e => setMinBalance(Number(e.target.value))} onFocus={e => e.target.select()} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.05} min={0} max={1} />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-ztextdim">Min Gap:</label>
+            <input type="number" value={minGap} onChange={e => setMinGap(Number(e.target.value))} onFocus={e => e.target.select()} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={5} min={0} max={50} />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-ztextdim">Max Step:</label>
+            <input type="number" value={maxStep} onChange={e => setMaxStep(Number(e.target.value))} onFocus={e => e.target.select()} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={1} min={1} max={50} />
           </div>
         </div>
       </div>

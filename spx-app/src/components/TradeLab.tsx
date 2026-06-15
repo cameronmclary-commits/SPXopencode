@@ -3,7 +3,8 @@ import type { SessionData, ChainSnapshot } from '../types'
 import { fetchSession } from '../api'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { findBestCombo, type ComboLeg } from '../utils/combos'
-import { ParamInput, TimeInput } from './shared/UI'
+import { surfacePrice } from '../utils/pricing'
+import { ParamInput } from './shared/UI'
 
 interface Props {
   selectedDate: string
@@ -23,9 +24,8 @@ export default function TradeLab({ selectedDate }: Props) {
   const [tick, setTick] = useState(0)
   const [speed, setSpeed] = useState(1)
   const [params, setParams] = useState({
-    maxCost: 50, templateMove: 10, minPnl: 0, minDelta: 0,
+    maxCost: 50, templateMove: 10, minPnl: 0, minSideDelta: 0.5, minBalance: 0.85, minGap: 15, maxStep: 10,
     tpPoints: 1, slPoints: 2, scanInterval: 5,
-    sessionStart: '09:30', sessionEnd: '16:00',
   })
   const [trades, setTrades] = useState<ForwardTrade[]>([])
   const [cumPnl, setCumPnl] = useState(0)
@@ -63,15 +63,14 @@ export default function TradeLab({ selectedDate }: Props) {
   const currentChain = useMemo(() => snapshots[tick]?.chain || sessionData?.openingChain || [], [snapshots, tick, sessionData])
 
   function timeToMinutes(t: string) { const [h, m] = t.split(':').map(Number); return h * 60 + m }
-  function timeInRange(t: string, start: string, end: string) { return t >= start && t <= end }
 
   // Scan & trade logic on each tick
   useEffect(() => {
     if (!sessionData) return
     if (openTradeRef.current) return
     const tickMin = timeToMinutes(currentTime)
-    if (tickMin < nextScanRef.current || !timeInRange(currentTime, params.sessionStart, params.sessionEnd)) return
-    const results = findBestCombo(currentChain, currentPrice, params.maxCost, params.templateMove, params.minPnl, params.minDelta)
+    if (tickMin < nextScanRef.current) return
+    const results = findBestCombo(currentChain, currentPrice, params.maxCost, params.templateMove, params.minPnl, params.minSideDelta, params.minBalance, params.minGap, params.maxStep)
     if (!results.length) return
     const pos = results[0]
     const trade: ForwardTrade = {
@@ -90,8 +89,7 @@ export default function TradeLab({ selectedDate }: Props) {
     if (!ot || !sessionData) return
     if (tick === ot.entryTick) return
     const currentVal = ot.legs.reduce((s, l) => {
-      const opt = currentChain.find(r => r.strike === l.strike && r.type === l.type)
-      return s + l.quantity * (opt?.bid ?? 0)
+      return s + l.quantity * surfacePrice(currentChain, l.strike, l.type, 0, false)
     }, 0)
     const pnl = currentVal - ot.entryCost
 
@@ -113,8 +111,7 @@ export default function TradeLab({ selectedDate }: Props) {
     if (!ot || !sessionData) return
     if (tick < sessionData.pricePath.length - 1) return
     const currentVal = ot.legs.reduce((s, l) => {
-      const opt = currentChain.find(r => r.strike === l.strike && r.type === l.type)
-      return s + l.quantity * (opt?.bid ?? 0)
+      return s + l.quantity * surfacePrice(currentChain, l.strike, l.type, 0, false)
     }, 0)
     const pnl = currentVal - ot.entryCost
     const closed = { ...ot, exitTick: tick, exitTime: currentTime, exitValue: currentVal, pnl, exitReason: 'EOS', status: 'closed' as const }
@@ -175,12 +172,13 @@ export default function TradeLab({ selectedDate }: Props) {
             <ParamInput label="Max Cost (pts)" value={params.maxCost} onChange={v => setParams(p => ({ ...p, maxCost: v }))} min={5} max={200} step={5} />
             <ParamInput label="Template (pts)" value={params.templateMove} onChange={v => setParams(p => ({ ...p, templateMove: v }))} min={5} max={20} step={2.5} />
             <ParamInput label="Min P&L (pts)" value={params.minPnl} onChange={v => setParams(p => ({ ...p, minPnl: v }))} min={0} max={5} step={0.1} />
-            <ParamInput label="Min Delta" value={params.minDelta} onChange={v => setParams(p => ({ ...p, minDelta: v }))} min={0} max={1} step={0.05} />
+            <ParamInput label="Min Side Delta" value={params.minSideDelta} onChange={v => setParams(p => ({ ...p, minSideDelta: v }))} min={0} max={1} step={0.05} />
+            <ParamInput label="Min Balance" value={params.minBalance} onChange={v => setParams(p => ({ ...p, minBalance: v }))} min={0} max={1} step={0.05} />
+            <ParamInput label="Min Gap" value={params.minGap} onChange={v => setParams(p => ({ ...p, minGap: v }))} min={0} max={50} step={5} />
+            <ParamInput label="Max Step" value={params.maxStep} onChange={v => setParams(p => ({ ...p, maxStep: v }))} min={1} max={50} step={1} />
             <ParamInput label="Scan Every (min)" value={params.scanInterval} onChange={v => setParams(p => ({ ...p, scanInterval: v }))} min={0.1} max={30} step={0.1} />
             <ParamInput label="TP (pts)" value={params.tpPoints} onChange={v => setParams(p => ({ ...p, tpPoints: v }))} min={0.5} max={10} step={0.5} />
             <ParamInput label="SL (pts)" value={params.slPoints} onChange={v => setParams(p => ({ ...p, slPoints: v }))} min={0.5} max={10} step={0.5} />
-            <TimeInput label="Session Start" value={params.sessionStart} onChange={v => setParams(p => ({ ...p, sessionStart: v }))} />
-            <TimeInput label="Session End" value={params.sessionEnd} onChange={v => setParams(p => ({ ...p, sessionEnd: v }))} />
           </div>
         </div>
 
@@ -221,7 +219,7 @@ export default function TradeLab({ selectedDate }: Props) {
               <tbody>
                 {allTrades.map(t => {
                   const pnl = t.status === 'open'
-                    ? t.legs.reduce((s, l) => { const o = currentChain.find(r => r.strike === l.strike && r.type === l.type); return s + l.quantity * (o?.bid ?? 0) }, 0) - t.entryCost
+                    ? t.legs.reduce((s, l) => s + l.quantity * surfacePrice(currentChain, l.strike, l.type, 0, false), 0) - t.entryCost
                     : t.pnl ?? 0
                   return (
                     <tr key={t.id} className={`border-b border-zborder/50 ${t.status === 'open' ? 'bg-zcyan/5' : ''}`}>

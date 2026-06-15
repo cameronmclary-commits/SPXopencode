@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import type { SessionData, OptionRow, ChainSnapshot } from '../types'
 import { XAxis, YAxis, Tooltip, ResponsiveContainer, Area, AreaChart, BarChart, Bar } from 'recharts'
 
@@ -10,8 +10,8 @@ interface Props {
 function findATM(chain: OptionRow[], spot: number) {
   const calls = chain.filter(r => r.type === 'call').sort((a, b) => a.strike - b.strike)
   const puts = chain.filter(r => r.type === 'put').sort((a, b) => a.strike - b.strike)
-  const atmCall = calls.reduce((best, r) => Math.abs(r.strike - spot) < Math.abs(best.strike - spot) ? r : best)
-  const atmPut = puts.reduce((best, r) => Math.abs(r.strike - spot) < Math.abs(best.strike - spot) ? r : best)
+  const atmCall = calls.length ? calls.reduce((best, r) => Math.abs(r.strike - spot) < Math.abs(best.strike - spot) ? r : best) : null
+  const atmPut = puts.length ? puts.reduce((best, r) => Math.abs(r.strike - spot) < Math.abs(best.strike - spot) ? r : best) : null
   return { atmCall, atmPut }
 }
 
@@ -29,8 +29,9 @@ function totalOI(chain: OptionRow[]): { calls: number; puts: number } {
 }
 
 function findATMInSnapshot(snapshot: ChainSnapshot): { callMid: number; putMid: number; straddle: number } {
-  const calls = snapshot.chain.filter(r => r.type === 'call')
-  const puts = snapshot.chain.filter(r => r.type === 'put')
+  const valid = snapshot.chain.filter(r => r.bid > 0 && r.ask > 0 && r.ask > r.bid)
+  const calls = valid.filter(r => r.type === 'call')
+  const puts = valid.filter(r => r.type === 'put')
   const spot = snapshot.spot
   if (!calls.length || !puts.length) return { callMid: 0, putMid: 0, straddle: 0 }
   const atmCall = calls.reduce((best, r) => Math.abs(r.strike - spot) < Math.abs(best.strike - spot) ? r : best)
@@ -105,9 +106,14 @@ export default function Overview({ data, loading }: Props) {
 
   const { spotPrice, pricePath, dailyLow, dailyHigh, dailyChange } = data || { spotPrice: liveSpot, pricePath: [], dailyLow: liveSpot, dailyHigh: liveSpot, dailyChange: 0 }
   const openingChain = displayChain
+  const snapshotsByTime = useMemo(() => {
+    const m = new Map<string, ChainSnapshot>()
+    for (const s of snapshots) m.set(s.time, s)
+    return m
+  }, [snapshots])
 
-  const chainPath = pricePath.map((p, i) => {
-    const snap = snapshots[i]
+  const chainPath = pricePath.map((p) => {
+    const snap = snapshotsByTime.get(p.time)
     if (snap) {
       const { callMid, putMid, straddle } = findATMInSnapshot(snap)
       return { ...p, callMid, putMid, straddle }
@@ -115,10 +121,26 @@ export default function Overview({ data, loading }: Props) {
     return { ...p, callMid: 0, putMid: 0, straddle: 0 }
   })
 
-  const { atmCall, atmPut } = findATM(openingChain, displaySpot)
-  const spread = avgSpread(openingChain, displaySpot, 5)
-  const oi = totalOI(openingChain)
-  const straddle = atmCall.mid + atmPut.mid
+  const lastSnap = hasLive ? null : snapshots[snapshots.length - 1]
+  const displayChainForATM = hasLive ? displayChain : (lastSnap?.chain || openingChain)
+  const displaySpotForATM = hasLive ? displaySpot : (lastSnap?.spot || displaySpot)
+  const { atmCall, atmPut } = findATM(displayChainForATM, displaySpotForATM)
+  const spread = avgSpread(displayChainForATM, displaySpotForATM, 5)
+
+  const allDayChain = useMemo(() => {
+    if (hasLive) return displayChain
+    if (snapshots.length === 0) return openingChain
+    const seen = new Map<string, OptionRow>()
+    for (const s of snapshots) {
+      for (const opt of s.chain) {
+        seen.set(`${opt.strike}-${opt.type}`, opt)
+      }
+    }
+    return Array.from(seen.values())
+  }, [snapshots, hasLive, displayChain, openingChain])
+
+  const oi = totalOI(allDayChain)
+  const straddle = atmCall && atmPut ? atmCall.mid + atmPut.mid : 0
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -141,8 +163,8 @@ export default function Overview({ data, loading }: Props) {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatCard label="Range" value={`${(dailyHigh - dailyLow).toFixed(1)} pts`} />
         <StatCard label="Move %" value={`${(dailyChange / (spotPrice - dailyChange) * 100).toFixed(2)}%`} change={dailyChange >= 0} />
-        <StatCard label="ATM Call" value={atmCall.mid.toFixed(2)} subtitle={hasLive ? `${atmCall.strike.toFixed(0)} strike (live)` : `${atmCall.strike.toFixed(0)} strike`} />
-        <StatCard label="ATM Put" value={atmPut.mid.toFixed(2)} subtitle={hasLive ? `${atmPut.strike.toFixed(0)} strike (live)` : `${atmPut.strike.toFixed(0)} strike`} />
+        <StatCard label="ATM Call" value={atmCall?.mid.toFixed(2) || '—'} subtitle={hasLive ? `${atmCall?.strike.toFixed(0) || '—'} strike (live)` : `${atmCall?.strike.toFixed(0) || '—'} strike`} />
+        <StatCard label="ATM Put" value={atmPut?.mid.toFixed(2) || '—'} subtitle={hasLive ? `${atmPut?.strike.toFixed(0) || '—'} strike (live)` : `${atmPut?.strike.toFixed(0) || '—'} strike`} />
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -188,14 +210,14 @@ export default function Overview({ data, loading }: Props) {
         <div className="panel-bg border border-zborder rounded-lg p-4">
           <h3 className="text-sm font-medium text-ztextdim tracking-wide mb-3">Chain Overview {hasLive && <span className="text-zgreen text-[10px]">(live)</span>}</h3>
           <div className="space-y-2 text-xs">
-            <Row label="Total Strikes" value={openingChain.length.toString()} />
-            <Row label="Calls" value={openingChain.filter(r => r.type === 'call').length.toString()} color="text-zgreen" />
-            <Row label="Puts" value={openingChain.filter(r => r.type === 'put').length.toString()} color="text-zred" />
+            <Row label="Total Strikes" value={allDayChain.length.toString()} />
+            <Row label="Calls" value={allDayChain.filter(r => r.type === 'call').length.toString()} color="text-zgreen" />
+            <Row label="Puts" value={allDayChain.filter(r => r.type === 'put').length.toString()} color="text-zred" />
             <Row label="Put/Call OI Ratio" value={`${(oi.puts / (oi.calls || 1)).toFixed(2)}x`} />
-            <Row label="ATM Strike (Call)" value={atmCall.strike.toFixed(0)} />
-            <Row label="ATM Strike (Put)" value={atmPut.strike.toFixed(0)} />
-            <Row label="ATM Spread" value={`${(atmCall.ask - atmCall.bid).toFixed(2)} / ${(atmPut.ask - atmPut.bid).toFixed(2)}`} />
-            <Row label="Strikes ±1%" value={openingChain.filter(r => Math.abs(r.strike - displaySpot) / displaySpot < 0.01).length.toString()} />
+            <Row label="ATM Strike (Call)" value={atmCall?.strike.toFixed(0) || '—'} />
+            <Row label="ATM Strike (Put)" value={atmPut?.strike.toFixed(0) || '—'} />
+            <Row label="ATM Spread" value={atmCall && atmPut ? `${(atmCall.ask - atmCall.bid).toFixed(2)} / ${(atmPut.ask - atmPut.bid).toFixed(2)}` : '—'} />
+            <Row label="Strikes ±1%" value={allDayChain.filter(r => Math.abs(r.strike - displaySpot) / displaySpot < 0.01).length.toString()} />
           </div>
         </div>
 
@@ -209,8 +231,8 @@ export default function Overview({ data, loading }: Props) {
             for (let k = minK; k <= maxK; k += step) {
               bins.push({
                 name: `${k}`,
-                calls: openingChain.filter(r => r.type === 'call' && r.strike === k).length,
-                puts: openingChain.filter(r => r.type === 'put' && r.strike === k).length,
+                calls: allDayChain.filter(r => r.type === 'call' && r.strike === k).length,
+                puts: allDayChain.filter(r => r.type === 'put' && r.strike === k).length,
               })
             }
             return (

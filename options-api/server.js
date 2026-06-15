@@ -91,7 +91,7 @@ app.get('/api/sessions/:date/snapshots', async (req, res) => {
       return res.status(404).json({ error: 'No OPRA data for ' + date });
     }
 
-    const snapshots = minutes.map(m => {
+    const snapshots = minutes.filter(m => m.spot > 0).map(m => {
       const dt = new Date(m.time + 'Z');
       const etHour = (dt.getUTCHours() - 4 + 24) % 24;
       const etMin = dt.getUTCMinutes();
