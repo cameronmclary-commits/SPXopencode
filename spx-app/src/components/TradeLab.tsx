@@ -1,17 +1,18 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import type { SessionData, ChainSnapshot, OptionRow } from '../types'
+import { useState, useEffect, useRef, useMemo } from 'react'
+import type { SessionData, ChainSnapshot } from '../types'
 import { fetchSession } from '../api'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
+import { findBestCombo, type ComboLeg } from '../utils/combos'
+import { ParamInput, TimeInput } from './shared/UI'
 
 interface Props {
   selectedDate: string
 }
 
-interface PaperTrade {
-  id: string; strike: number; type: 'call' | 'put';
-  entryPrice: number; entryTick: number; entryTime: string;
-  quantity: number; status: 'open' | 'closed';
-  exitPrice?: number; exitTick?: number; exitTime?: string; pnl?: number
+interface ForwardTrade {
+  id: string; legs: ComboLeg[]; entryCost: number; entryTick: number; entryTime: string
+  exitTick?: number; exitTime?: string; exitValue?: number; pnl?: number
+  exitReason?: string; status: 'open' | 'closed'
 }
 
 export default function TradeLab({ selectedDate }: Props) {
@@ -21,123 +22,120 @@ export default function TradeLab({ selectedDate }: Props) {
   const [playing, setPlaying] = useState(false)
   const [tick, setTick] = useState(0)
   const [speed, setSpeed] = useState(1)
-  const [paperTrades, setPaperTrades] = useState<PaperTrade[]>([])
-  const [autoPilot, setAutoPilot] = useState(false)
-  const [tpPts, setTpPts] = useState(1)
-  const [slPts, setSlPts] = useState(2)
+  const [params, setParams] = useState({
+    maxCost: 50, templateMove: 10, minPnl: 0, minDelta: 0,
+    tpPoints: 1, slPoints: 2, scanInterval: 5,
+    sessionStart: '09:30', sessionEnd: '16:00',
+  })
+  const [trades, setTrades] = useState<ForwardTrade[]>([])
+  const [openTrade, setOpenTrade] = useState<ForwardTrade | null>(null)
+  const [nextScan, setNextScan] = useState(-1)
+  const [cumPnl, setCumPnl] = useState(0)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
     if (!selectedDate) return
-    setLoading(true)
-    setTick(0)
-    setPlaying(false)
-    setAutoPilot(false)
-    setPaperTrades([])
-    setSnapshots([])
-
+    setLoading(true); setTick(0); setPlaying(false)
+    setTrades([]); setOpenTrade(null); setNextScan(-1); setCumPnl(0)
     Promise.all([
       fetchSession(selectedDate),
       fetch(`/api/sessions/${selectedDate}/snapshots`).then(r => r.json()).then(d => d.snapshots || []),
     ])
-      .then(([session, snaps]) => {
-        setSessionData(session)
-        setSnapshots(snaps)
-      })
+      .then(([session, snaps]) => { setSessionData(session); setSnapshots(snaps) })
       .catch(() => { setSessionData(null); setSnapshots([]) })
       .finally(() => setLoading(false))
   }, [selectedDate])
 
   useEffect(() => {
-    if (playing && sessionData) {
-      timerRef.current = setInterval(() => {
-        setTick(t => {
-          const next = t + 1 * speed
-          if (next >= sessionData.pricePath.length - 1) {
-            setPlaying(false)
-            return sessionData.pricePath.length - 1
-          }
-          return next
-        })
-      }, 100)
-    }
+    if (!playing || !sessionData) { if (timerRef.current) clearInterval(timerRef.current); return }
+    timerRef.current = setInterval(() => {
+      setTick(t => {
+        if (t >= sessionData.pricePath.length - 1) { setPlaying(false); return t }
+        return t + 1 * speed
+      })
+    }, 100)
     return () => { if (timerRef.current) clearInterval(timerRef.current) }
   }, [playing, sessionData, speed])
 
-  const currentPrice = sessionData?.pricePath[tick]?.price || sessionData?.spotPrice || 0
-  const currentSnapshot = useMemo(() => {
-    return snapshots[tick] || snapshots[0] || null
-  }, [snapshots, tick])
+  const currentPrice = sessionData?.pricePath[tick]?.price || 0
+  const currentTime = sessionData?.pricePath[tick]?.time || ''
+  const currentChain = useMemo(() => snapshots[tick]?.chain || sessionData?.openingChain || [], [snapshots, tick, sessionData])
 
-  const chain = currentSnapshot?.chain || sessionData?.openingChain || []
+  function timeToMinutes(t: string) { const [h, m] = t.split(':').map(Number); return h * 60 + m }
+  function timeInRange(t: string, start: string, end: string) { return t >= start && t <= end }
 
-  const handleBuy = useCallback((strike: number, type: 'call' | 'put') => {
-    const option = chain.find(r => r.strike === strike && r.type === type)
-    if (!option) return
-    setPaperTrades(prev => [...prev, {
-      id: Date.now().toString(),
-      strike,
-      type,
-      entryPrice: option.ask,
-      entryTick: tick,
-      entryTime: sessionData?.pricePath[tick]?.time || '',
-      quantity: 1,
-      status: 'open',
-    }])
-  }, [chain, tick, sessionData])
-
-  const closeTrade = useCallback((id: string) => {
-    setPaperTrades(prev => prev.map(t => {
-      if (t.id !== id || t.status !== 'open') return t
-      const option = chain.find(r => r.strike === t.strike && r.type === t.type)
-      if (!option) return t
-      const exitPrice = option.bid
-      const pnl = (exitPrice - t.entryPrice) * t.quantity
-      return { ...t, status: 'closed' as const, exitPrice, exitTick: tick, exitTime: sessionData?.pricePath[tick]?.time || '', pnl }
-    }))
-  }, [chain, tick, sessionData])
-
+  // Scan & trade logic on each tick
   useEffect(() => {
-    if (!autoPilot || !sessionData) return
-    const tickPct = tick / (sessionData.pricePath.length - 1)
-    if (tickPct < 0.3) return
-
-    const openTrades = paperTrades.filter(t => t.status === 'open')
-    for (const t of openTrades) {
-      const option = chain.find(r => r.strike === t.strike && r.type === t.type)
-      if (!option) continue
-      const unrealized = (option.bid - t.entryPrice) * t.quantity
-      if (unrealized >= tpPts) closeTrade(t.id)
-      else if (unrealized <= -slPts) closeTrade(t.id)
+    if (!sessionData || openTrade) return
+    const tickMin = timeToMinutes(currentTime)
+    if (tickMin < nextScan || !timeInRange(currentTime, params.sessionStart, params.sessionEnd)) return
+    const results = findBestCombo(currentChain, currentPrice, params.maxCost, params.templateMove, params.minPnl, params.minDelta)
+    if (!results.length) return
+    const pos = results[0]
+    const trade: ForwardTrade = {
+      id: `ft_${Date.now()}`,
+      legs: pos.legs, entryCost: pos.cost,
+      entryTick: tick, entryTime: currentTime,
+      status: 'open',
     }
-  }, [autoPilot, tick, sessionData, paperTrades, chain, tpPts, slPts, closeTrade])
+    setOpenTrade(trade)
+    setNextScan(tickMin + params.scanInterval)
+  }, [tick, sessionData, openTrade, currentChain, currentPrice, currentTime, params, nextScan])
+
+  // Monitor open trade for TP/SL
+  useEffect(() => {
+    if (!openTrade || !sessionData) return
+    if (tick === openTrade.entryTick) return
+    const currentVal = openTrade.legs.reduce((s, l) => {
+      const opt = currentChain.find(r => r.strike === l.strike && r.type === l.type)
+      return s + l.quantity * (opt?.bid ?? 0)
+    }, 0)
+    const pnl = currentVal - openTrade.entryCost
+
+    let reason = ''
+    if (pnl >= params.tpPoints) reason = 'TP'
+    else if (pnl <= -params.slPoints) reason = 'SL'
+
+    if (reason) {
+      const closed = { ...openTrade, exitTick: tick, exitTime: currentTime, exitValue: currentVal, pnl, exitReason: reason, status: 'closed' as const }
+      setTrades(prev => [...prev, closed])
+      setCumPnl(prev => prev + pnl)
+      setOpenTrade(null)
+    }
+  }, [tick, openTrade, sessionData, currentChain, currentTime, params])
+
+  // Auto-close at end of session
+  useEffect(() => {
+    if (!openTrade || !sessionData) return
+    if (tick < sessionData.pricePath.length - 1) return
+    const currentVal = openTrade.legs.reduce((s, l) => {
+      const opt = currentChain.find(r => r.strike === l.strike && r.type === l.type)
+      return s + l.quantity * (opt?.bid ?? 0)
+    }, 0)
+    const pnl = currentVal - openTrade.entryCost
+    const closed = { ...openTrade, exitTick: tick, exitTime: currentTime, exitValue: currentVal, pnl, exitReason: 'EOS', status: 'closed' as const }
+    setTrades(prev => [...prev, closed])
+    setCumPnl(prev => prev + pnl)
+    setOpenTrade(null)
+  }, [tick, sessionData])
 
   if (loading) return <div className="text-center py-12 text-ztextdim animate-pulse">Loading session...</div>
   if (!sessionData) return <div className="text-center py-12 text-ztextdim">Select a session date.</div>
 
   const totalTicks = sessionData.pricePath.length
   const progress = tick / (totalTicks - 1)
-  const pnl = paperTrades.reduce((s, t) => s + (t.pnl || 0), 0)
+  const allTrades = [...trades, ...(openTrade ? [openTrade] : [])]
 
   return (
-    <div className="space-y-6">
-      {/* Controls */}
+    <div className="space-y-4">
       <div className="bg-zgray/30 border border-zborder rounded-lg p-4">
         <div className="flex flex-wrap items-center gap-3">
-          <button
-            onClick={() => setPlaying(p => !p)}
-            className={`px-4 py-1.5 text-sm font-medium rounded ${
-              playing ? 'bg-zred/20 text-zred border border-zred' : 'bg-zcyan/20 text-zcyan border border-zcyan'
-            }`}
-          >
+          <button onClick={() => setPlaying(p => !p)}
+            className={`px-4 py-1.5 text-sm font-medium rounded ${playing ? 'bg-zred/20 text-zred border border-zred' : 'bg-zcyan/20 text-zcyan border border-zcyan'}`}>
             {playing ? 'Pause' : 'Play'}
           </button>
-          <button
-            onClick={() => { setTick(0); setPlaying(false) }}
-            className="px-3 py-1.5 text-xs text-ztextdim border border-zborder rounded hover:text-ztext"
-          >
-            Reset
-          </button>
+          <button onClick={() => { setTick(0); setPlaying(false); setOpenTrade(null); setNextScan(-1) }}
+            className="px-3 py-1.5 text-xs text-ztextdim border border-zborder rounded hover:text-ztext">Reset</button>
           <div className="flex items-center gap-2">
             <label className="text-xs text-ztextdim">Speed:</label>
             <select value={speed} onChange={e => setSpeed(Number(e.target.value))} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext">
@@ -145,14 +143,20 @@ export default function TradeLab({ selectedDate }: Props) {
               <option value={2}>2x</option>
               <option value={5}>5x</option>
               <option value={10}>10x</option>
+              <option value={25}>25x</option>
             </select>
           </div>
+          <span className="text-xs text-ztextdim font-mono">{currentTime}</span>
+          <span className={`text-xs font-mono font-semibold ${cumPnl >= 0 ? 'text-zgreen' : 'text-zred'}`}>
+            P&L: {cumPnl >= 0 ? '+' : ''}{cumPnl.toFixed(2)} pts
+          </span>
+          {openTrade && <span className="text-xs text-zyellow animate-pulse">● Active</span>}
         </div>
         <div className="mt-3">
           <div className="flex justify-between text-xs text-ztextdim mb-1">
             <span>{sessionData.pricePath[0]?.time}</span>
-            <span>{sessionData.pricePath[tick]?.time}</span>
-            <span>{sessionData.pricePath[sessionData.pricePath.length - 1]?.time}</span>
+            <span className="text-zcyan font-mono">${currentPrice.toFixed(2)}</span>
+            <span>{sessionData.pricePath[totalTicks - 1]?.time}</span>
           </div>
           <div className="h-1.5 bg-zborder rounded-full overflow-hidden">
             <div className="h-full bg-zcyan rounded-full transition-all" style={{ width: `${progress * 100}%` }} />
@@ -160,91 +164,77 @@ export default function TradeLab({ selectedDate }: Props) {
         </div>
       </div>
 
-      {/* Price Chart */}
-      <div className="bg-zgray/30 border border-zborder rounded-lg p-4">
-        <div className="flex items-center justify-between mb-2">
-          <h3 className="text-sm font-medium text-ztextdim">Price Replay</h3>
-          <span className="text-lg font-semibold text-white font-mono">${currentPrice.toFixed(2)}</span>
-        </div>
-        <ResponsiveContainer width="100%" height={200}>
-          <AreaChart data={sessionData.pricePath.slice(0, tick + 1)}>
-            <defs>
-              <linearGradient id="replayGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#06b6d4" stopOpacity={0.15} />
-                <stop offset="100%" stopColor="#06b6d4" stopOpacity={0} />
-              </linearGradient>
-            </defs>
-            <XAxis dataKey="time" tick={{ fontSize: 10, fill: '#6b7280' }} />
-            <YAxis domain={['dataMin', 'dataMax']} tick={{ fontSize: 10, fill: '#6b7280' }} padding={{ top: 20, bottom: 20 }} />
-            <Tooltip
-              contentStyle={{ background: '#1a1a2e', border: '1px solid #2a2a4a', borderRadius: 8, fontSize: 12 }}
-            />
-            <Area type="monotone" dataKey="price" stroke="#06b6d4" fill="url(#replayGrad)" strokeWidth={2} dot={false} />
-          </AreaChart>
-        </ResponsiveContainer>
-      </div>
-
-      {/* Real Chain */}
-      <div className="bg-zgray/30 border border-zborder rounded-lg p-4">
-        <h3 className="text-sm font-medium text-ztextdim mb-3">Chain at ${currentPrice.toFixed(0)} ({currentSnapshot?.time || '—'})</h3>
-        <p className="text-xs text-ztextdim mb-3">Click <span className="text-zgreen">Buy</span> to enter a long at ask price. Close later at the bid price.</p>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <MiniChainTable title="CALLS" rows={chain.filter(r => r.type === 'call' && Math.abs(r.strike - currentPrice) <= 40).slice(0, 15)} color="text-zgreen" showActions onBuy={handleBuy} />
-          <MiniChainTable title="PUTS" rows={chain.filter(r => r.type === 'put' && Math.abs(r.strike - currentPrice) <= 40).slice(0, 15)} color="text-zred" showActions onBuy={handleBuy} />
-        </div>
-      </div>
-
-      {/* Paper Trades */}
-      <div className="bg-zgray/30 border border-zborder rounded-lg p-4">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-medium text-ztextdim">Paper Trades</h3>
-          <div className="flex items-center gap-3">
-            <span className={`text-sm font-mono font-semibold ${pnl >= 0 ? 'text-zgreen' : 'text-zred'}`}>
-              P&L: ${pnl.toFixed(2)}
-            </span>
-            <span className="text-xs text-ztextdim">{paperTrades.filter(t => t.status === 'open').length} open</span>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="bg-zgray/30 border border-zborder rounded-lg p-4">
+          <h3 className="text-sm font-medium text-ztextdim mb-3">Forward-Test Parameters</h3>
+          <div className="grid grid-cols-2 gap-3">
+            <ParamInput label="Max Cost (pts)" value={params.maxCost} onChange={v => setParams(p => ({ ...p, maxCost: v }))} min={5} max={200} step={5} />
+            <ParamInput label="Template (pts)" value={params.templateMove} onChange={v => setParams(p => ({ ...p, templateMove: v }))} min={5} max={20} step={2.5} />
+            <ParamInput label="Min P&L (pts)" value={params.minPnl} onChange={v => setParams(p => ({ ...p, minPnl: v }))} min={0} max={5} step={0.1} />
+            <ParamInput label="Min Delta" value={params.minDelta} onChange={v => setParams(p => ({ ...p, minDelta: v }))} min={0} max={1} step={0.05} />
+            <ParamInput label="Scan Every (min)" value={params.scanInterval} onChange={v => setParams(p => ({ ...p, scanInterval: v }))} min={0.1} max={30} step={0.1} />
+            <ParamInput label="TP (pts)" value={params.tpPoints} onChange={v => setParams(p => ({ ...p, tpPoints: v }))} min={0.5} max={10} step={0.5} />
+            <ParamInput label="SL (pts)" value={params.slPoints} onChange={v => setParams(p => ({ ...p, slPoints: v }))} min={0.5} max={10} step={0.5} />
+            <TimeInput label="Session Start" value={params.sessionStart} onChange={v => setParams(p => ({ ...p, sessionStart: v }))} />
+            <TimeInput label="Session End" value={params.sessionEnd} onChange={v => setParams(p => ({ ...p, sessionEnd: v }))} />
           </div>
         </div>
 
-        {paperTrades.length === 0 ? (
-          <p className="text-xs text-ztextdim">Click buy/sell on chain rows above to enter paper trades.</p>
+        <div className="bg-zgray/30 border border-zborder rounded-lg p-4">
+          <h3 className="text-sm font-medium text-ztextdim mb-3">Price Chart</h3>
+          <span className="text-lg font-semibold text-white font-mono">${currentPrice.toFixed(2)}</span>
+          <ResponsiveContainer width="100%" height={160}>
+            <AreaChart data={sessionData.pricePath.slice(0, tick + 1)}>
+              <defs><linearGradient id="ftGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#06b6d4" stopOpacity={0.15} /><stop offset="100%" stopColor="#06b6d4" stopOpacity={0} /></linearGradient></defs>
+              <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#6b7280' }} />
+              <YAxis domain={['dataMin', 'dataMax']} tick={{ fontSize: 9, fill: '#6b7280' }} padding={{ top: 20, bottom: 20 }} />
+              <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid #2a2a4a', borderRadius: 8, fontSize: 11 }} />
+              <Area type="monotone" dataKey="price" stroke="#06b6d4" fill="url(#ftGrad)" strokeWidth={2} dot={false} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      <div className="bg-zgray/30 border border-zborder rounded-lg p-4">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-medium text-ztextdim">Trades</h3>
+          <span className="text-xs text-ztextdim">{allTrades.length} total</span>
+        </div>
+        {allTrades.length === 0 ? (
+          <p className="text-xs text-ztextdim py-2">No trades yet. Press Play — combos will be auto-scanned and traded.</p>
         ) : (
-          <div className="overflow-x-auto max-h-48 overflow-y-auto">
+          <div className="overflow-x-auto max-h-64 overflow-y-auto">
             <table className="w-full text-xs">
-              <thead className="text-ztextdim border-b border-zborder">
-                <tr>
-                  <th className="text-left px-2 py-1">#</th>
-                  <th className="text-left px-2 py-1">Strike</th>
-                  <th className="text-left px-2 py-1">Type</th>
+              <thead className="sticky top-0 bg-zdark/95 backdrop-blur-sm">
+                <tr className="text-ztextdim border-b border-zborder">
+                  <th className="text-left px-2 py-1">Legs</th>
                   <th className="text-right px-2 py-1">Entry</th>
-                  <th className="text-right px-2 py-1">Current</th>
+                  <th className="text-right px-2 py-1">Exit</th>
                   <th className="text-right px-2 py-1">P&L</th>
-                  <th className="text-center px-2 py-1">Status</th>
-                  <th className="text-center px-2 py-1">Action</th>
+                  <th className="text-center px-2 py-1">Reason</th>
                 </tr>
               </thead>
               <tbody>
-                {paperTrades.map(t => {
-                  const option = chain.find(r => r.strike === t.strike && r.type === t.type)
-                  const curVal = option?.bid || 0
-                  const unrealizedPnl = (curVal - t.entryPrice) * t.quantity
+                {allTrades.map(t => {
+                  const pnl = t.status === 'open'
+                    ? t.legs.reduce((s, l) => { const o = currentChain.find(r => r.strike === l.strike && r.type === l.type); return s + l.quantity * (o?.bid ?? 0) }, 0) - t.entryCost
+                    : t.pnl ?? 0
                   return (
-                    <tr key={t.id} className="border-b border-zborder/50">
-                      <td className="px-2 py-1 font-mono text-ztextdim">{t.id.slice(-4)}</td>
-                      <td className="px-2 py-1 font-mono">{t.strike.toFixed(0)}</td>
-                      <td className={`px-2 py-1 ${t.type === 'call' ? 'text-zgreen' : 'text-zred'}`}>{t.type.toUpperCase()}</td>
-                      <td className="text-right px-2 py-1 font-mono">{t.entryPrice.toFixed(2)}</td>
-                      <td className="text-right px-2 py-1 font-mono">{curVal.toFixed(2)}</td>
-                      <td className={`text-right px-2 py-1 font-mono ${(t.pnl ?? unrealizedPnl) >= 0 ? 'text-zgreen' : 'text-zred'}`}>
-                        {(t.status === 'closed' ? t.pnl! : unrealizedPnl).toFixed(2)}
+                    <tr key={t.id} className={`border-b border-zborder/50 ${t.status === 'open' ? 'bg-zcyan/5' : ''}`}>
+                      <td className="px-2 py-1 font-mono">
+                        <span className="text-zgreen">{t.legs.filter(l => l.type === 'call').map(l => `${l.strike.toFixed(0)}×${l.quantity}`).join('+')}</span>
+                        {' '}
+                        <span className="text-zred">{t.legs.filter(l => l.type === 'put').map(l => `${l.strike.toFixed(0)}×${l.quantity}`).join('+')}</span>
                       </td>
-                      <td className={`text-center px-2 py-1 ${t.status === 'closed' ? 'text-ztextdim' : 'text-zyellow'}`}>
-                        {t.status === 'closed' ? 'Closed' : 'Open'}
+                      <td className="text-right px-2 py-1 font-mono">{t.entryCost.toFixed(2)}<br /><span className="text-[9px] text-ztextdim/60">{t.entryTime}</span></td>
+                      <td className="text-right px-2 py-1 font-mono">
+                        {t.status === 'open' ? '—' : `${(t.exitValue ?? 0).toFixed(2)}`}
+                        {t.status === 'closed' && t.exitTime && <br />}
+                        {t.status === 'closed' && t.exitTime && <span className="text-[9px] text-ztextdim/60">{t.exitTime}</span>}
                       </td>
-                      <td className="text-center px-2 py-1">
-                        {t.status === 'open' && (
-                          <button onClick={() => closeTrade(t.id)} className="text-xs text-zred hover:text-zred/80">Close</button>
-                        )}
+                      <td className={`text-right px-2 py-1 font-mono ${pnl >= 0 ? 'text-zgreen' : 'text-zred'}`}>{pnl > 0 ? '+' : ''}{pnl.toFixed(2)}</td>
+                      <td className={`text-center px-2 py-1 ${t.status === 'open' ? 'text-zyellow' : t.exitReason === 'TP' ? 'text-zgreen' : t.exitReason === 'SL' ? 'text-zred' : 'text-ztextdim'}`}>
+                        {t.status === 'open' ? 'Open' : t.exitReason}
                       </td>
                     </tr>
                   )
@@ -254,66 +244,9 @@ export default function TradeLab({ selectedDate }: Props) {
           </div>
         )}
       </div>
-
-      {/* Auto-Pilot */}
-      <div className="bg-zgray/30 border border-zborder rounded-lg p-4">
-        <div className="flex flex-wrap items-center gap-3">
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={autoPilot} onChange={e => setAutoPilot(e.target.checked)} className="accent-zcyan" />
-            <span className="text-ztext">Auto-Close</span>
-          </label>
-          <div className="flex items-center gap-2">
-            <label className="text-xs text-ztextdim">TP:</label>
-            <input type="number" value={tpPts} onChange={e => setTpPts(Number(e.target.value))} onFocus={e => e.target.select()} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.5} />
-            <span className="text-xs text-ztextdim">pts</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <label className="text-xs text-ztextdim">SL:</label>
-            <input type="number" value={slPts} onChange={e => setSlPts(Number(e.target.value))} onFocus={e => e.target.select()} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.5} />
-            <span className="text-xs text-ztextdim">pts</span>
-          </div>
-          <span className="text-xs text-ztextdim">
-            Closes open trades when P&L reaches TP or SL (activates after 30% of session).
-          </span>
-        </div>
-      </div>
     </div>
   )
 }
 
-function MiniChainTable({ title, rows, color, showActions, onBuy }: {
-  title: string; rows: OptionRow[]; color: string;
-  showActions?: boolean; onBuy?: (strike: number, type: 'call' | 'put') => void
-}) {
-  return (
-    <div className="bg-zdark/50 border border-zborder rounded overflow-hidden">
-      <div className={`px-3 py-1.5 text-xs font-semibold ${color} border-b border-zborder`}>
-        {title} ({rows.length})
-      </div>
-      <table className="w-full text-xs">
-        <thead className="text-ztextdim">
-          <tr className="border-b border-zborder/50">
-            <th className="text-left px-2 py-1">Strike</th>
-            <th className="text-right px-2 py-1">Bid</th>
-            <th className="text-right px-2 py-1">Ask</th>
-            {showActions && <th className="text-center px-2 py-1">Buy @ Ask</th>}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map(r => (
-            <tr key={`${r.strike}-${r.type}`} className="border-b border-zborder/20 hover:bg-zgray/10">
-              <td className={`px-2 py-1 font-mono ${color}`}>{r.strike.toFixed(0)}</td>
-              <td className="text-right px-2 py-1 font-mono">{r.bid.toFixed(2)}</td>
-              <td className="text-right px-2 py-1 font-mono">{r.ask.toFixed(2)}</td>
-              {showActions && (
-                <td className="text-center px-2 py-1">
-                  <button onClick={() => onBuy?.(r.strike, r.type)} className="text-xs text-zgreen hover:text-zgreen/80 px-2 py-0.5 border border-zgreen/30 rounded">Buy</button>
-                </td>
-              )}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
-}
+
+
