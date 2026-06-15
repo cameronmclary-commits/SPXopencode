@@ -36,6 +36,7 @@ export interface SessionData {
   dailyLow: number
   dailyHigh: number
   dailyClose: number
+  dailyChange: number
 }
 
 export interface ChainResponse {

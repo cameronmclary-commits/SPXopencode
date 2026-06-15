@@ -82,7 +82,7 @@ export default function Overview({ data, loading }: Props) {
     )
   }
 
-  const { spotPrice, pricePath, dailyLow, dailyHigh, dailyClose } = data || { spotPrice: liveSpot, pricePath: [], dailyLow: liveSpot, dailyHigh: liveSpot, dailyClose: liveSpot }
+  const { spotPrice, pricePath, dailyLow, dailyHigh, dailyClose, dailyChange } = data || { spotPrice: liveSpot, pricePath: [], dailyLow: liveSpot, dailyHigh: liveSpot, dailyClose: liveSpot, dailyChange: 0 }
   const openingChain = displayChain
 
   const chainPath = pricePath.map(p => {
@@ -110,15 +110,15 @@ export default function Overview({ data, loading }: Props) {
       )}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatCard label={hasLive ? 'Current' : 'Open'} value={displaySpot.toFixed(2)} />
+        <StatCard label={hasLive ? 'Current' : 'Close'} value={displaySpot.toFixed(2)} />
         <StatCard label="High" value={dailyHigh.toFixed(2)} change={dailyHigh > spotPrice} />
         <StatCard label="Low" value={dailyLow.toFixed(2)} change={dailyLow < spotPrice} />
-        <StatCard label="Close" value={dailyClose.toFixed(2)} change={dailyClose >= spotPrice} />
+        <StatCard label="Day Chg" value={`${dailyChange >= 0 ? '+' : ''}${dailyChange.toFixed(2)}`} change={dailyChange >= 0} />
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatCard label="Range" value={`${(dailyHigh - dailyLow).toFixed(1)} pts`} />
-        <StatCard label="Move %" value={`${((dailyClose - spotPrice) / spotPrice * 100).toFixed(2)}%`} change={dailyClose >= spotPrice} />
+        <StatCard label="Move %" value={`${(dailyChange / (spotPrice - dailyChange) * 100).toFixed(2)}%`} change={dailyChange >= 0} />
         <StatCard label="ATM Call" value={atmCall.mid.toFixed(2)} subtitle={hasLive ? `${atmCall.strike.toFixed(0)} strike (live)` : `${atmCall.strike.toFixed(0)} strike`} />
         <StatCard label="ATM Put" value={atmPut.mid.toFixed(2)} subtitle={hasLive ? `${atmPut.strike.toFixed(0)} strike (live)` : `${atmPut.strike.toFixed(0)} strike`} />
       </div>

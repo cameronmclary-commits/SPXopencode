@@ -57,9 +57,24 @@ function buildSessionFromRows(rows, dateStr) {
 
   chain.sort((a, b) => a.strike - b.strike);
 
-  const low = rows.reduce((min, r) => r.low != null && r.low < min ? r.low : min, spotPrice);
-  const high = rows.reduce((max, r) => r.high != null && r.high > max ? r.high : max, spotPrice);
-  const close = spotPrice + (rows[0]?.change || 0);
+  const ds = rows[0]?.ds || 0;
+  const open = spotPrice - ds;
+  const close = spotPrice;
+
+  const calls = rows.filter(r => r.option === 'call' && r.K);
+  calls.sort((a, b) => Math.abs(a.K - spotPrice) - Math.abs(b.K - spotPrice));
+  const atmCall = calls[0];
+
+  let low, high;
+  if (atmCall && atmCall.low && atmCall.high && atmCall.high > atmCall.low) {
+    const optionRange = atmCall.high - atmCall.low;
+    const estimatedMove = optionRange * 2;
+    low = spotPrice - estimatedMove / 2;
+    high = spotPrice + estimatedMove / 2;
+  } else {
+    low = Math.min(open, close);
+    high = Math.max(open, close);
+  }
 
   const pricePath = [];
   const steps = 78;
@@ -98,6 +113,7 @@ function buildSessionFromRows(rows, dateStr) {
     dailyLow: low,
     dailyHigh: high,
     dailyClose: close,
+    dailyChange: ds,
   };
 }
 
