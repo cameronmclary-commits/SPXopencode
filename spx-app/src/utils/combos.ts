@@ -97,7 +97,7 @@ export function findBestCombo(
 
   for (const otmCount of [2, 3]) {
     for (const itm of calls.filter(r => r.strike < spot)) {
-      const otms = puts.filter(r => r.strike > spot)
+      const otms = puts.filter(r => r.strike > itm.strike && r.strike < spot)
       if (otms.length < otmCount) continue
       for (const g of getConsecutiveGroups(otms, otmCount)) {
         const r = evalCombo(itm, g, chain, spot, maxCost, templateMove, minPnl, minDelta)
@@ -105,7 +105,7 @@ export function findBestCombo(
       }
     }
     for (const itm of puts.filter(r => r.strike > spot)) {
-      const otms = calls.filter(r => r.strike < spot)
+      const otms = calls.filter(r => r.strike < itm.strike && r.strike > spot)
       if (otms.length < otmCount) continue
       for (const g of getConsecutiveGroups(otms, otmCount)) {
         const r = evalCombo(itm, g, chain, spot, maxCost, templateMove, minPnl, minDelta)

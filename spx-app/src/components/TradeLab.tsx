@@ -9,8 +9,9 @@ interface Props {
 
 interface PaperTrade {
   id: string; strike: number; type: 'call' | 'put';
-  entryPrice: number; entryTick: number; quantity: number; status: 'open' | 'closed';
-  exitPrice?: number; exitTick?: number; pnl?: number
+  entryPrice: number; entryTick: number; entryTime: string;
+  quantity: number; status: 'open' | 'closed';
+  exitPrice?: number; exitTick?: number; exitTime?: string; pnl?: number
 }
 
 const R = 0.05
@@ -102,10 +103,11 @@ export default function TradeLab({ selectedDate }: Props) {
       type,
       entryPrice: option.ask,
       entryTick: tick,
+      entryTime: sessionData?.pricePath[tick]?.time || '',
       quantity: 1,
       status: 'open',
     }])
-  }, [repricedChain, tick])
+  }, [repricedChain, tick, sessionData])
 
   const closeTrade = useCallback((id: string) => {
     setPaperTrades(prev => prev.map(t => {
@@ -114,9 +116,9 @@ export default function TradeLab({ selectedDate }: Props) {
       if (!option) return t
       const exitPrice = option.bid
       const pnl = (exitPrice - t.entryPrice) * t.quantity
-      return { ...t, status: 'closed' as const, exitPrice, exitTick: tick, pnl }
+      return { ...t, status: 'closed' as const, exitPrice, exitTick: tick, exitTime: sessionData?.pricePath[tick]?.time || '', pnl }
     }))
-  }, [repricedChain, tick])
+  }, [repricedChain, tick, sessionData])
 
   useEffect(() => {
     if (!autoPilot || !sessionData) return

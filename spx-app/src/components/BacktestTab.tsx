@@ -47,7 +47,7 @@ function findBestCombo(chain: OptionRow[], spot: number, maxCost: number, templa
 
   for (const otmCount of [2, 3]) {
     for (const itm of calls.filter(r => r.strike < spot)) {
-      const otms = puts.filter(r => r.strike > spot)
+      const otms = puts.filter(r => r.strike > itm.strike && r.strike < spot)
       for (const g of getConsecutiveGroups(otms, otmCount)) {
         const r = evalCombo(itm, g, chain, spot, maxCost, templateMove, minPnl, minDelta)
         if (r && (!best || r.score > best.score)) best = r
@@ -55,7 +55,7 @@ function findBestCombo(chain: OptionRow[], spot: number, maxCost: number, templa
     }
 
     for (const itm of puts.filter(r => r.strike > spot)) {
-      const otms = calls.filter(r => r.strike < spot)
+      const otms = calls.filter(r => r.strike < itm.strike && r.strike > spot)
       for (const g of getConsecutiveGroups(otms, otmCount)) {
         const r = evalCombo(itm, g, chain, spot, maxCost, templateMove, minPnl, minDelta)
         if (r && (!best || r.score > best.score)) best = r
@@ -70,8 +70,6 @@ async function runBacktest(dates: string[], params: Params, onProgress: (u: { pc
   const trades: BacktestTrade[] = []
   const equityCurve: { tick: number; pnl: number }[] = []
   let cumPnl = 0
-
-  const tradesTakenThisDay = new Set<string>()
 
   for (let di = 0; di < dates.length; di++) {
     onProgress({ pct: (di / dates.length) * 100, msg: `Loading ${dates[di]}...`, cumPnl, trades, equityCurve })
@@ -119,6 +117,7 @@ async function runBacktest(dates: string[], params: Params, onProgress: (u: { pc
           cumPnl += pnl
           trades.push(trade); openTrade = null
           equityCurve.push({ tick: equityCurve.length, pnl: cumPnl })
+          onProgress({ pct: ((di + (tick / totalTicks)) / dates.length) * 100, msg: `${dates[di]} TP ${trade.legs.map(l => `${l.type[0]}${l.strike}`).join('+')} $${pnl.toFixed(2)}`, cumPnl, trades, equityCurve })
         } else if (pnl <= -params.slPoints) {
           trade.exitTick = tick; trade.exitTime = session.pricePath[tick].time
           trade.exitValue = currentVal; trade.pnl = pnl; trade.pnlPct = (pnl / trade.entryCost) * 100
@@ -126,7 +125,12 @@ async function runBacktest(dates: string[], params: Params, onProgress: (u: { pc
           cumPnl += pnl
           trades.push(trade); openTrade = null
           equityCurve.push({ tick: equityCurve.length, pnl: cumPnl })
+          onProgress({ pct: ((di + (tick / totalTicks)) / dates.length) * 100, msg: `${dates[di]} SL ${trade.legs.map(l => `${l.type[0]}${l.strike}`).join('+')} $${pnl.toFixed(2)}`, cumPnl, trades, equityCurve })
         }
+      }
+
+      if (tick % 50 === 0 && tick > 0) {
+        onProgress({ pct: ((di + (tick / totalTicks)) / dates.length) * 100, msg: `Processing ${dates[di]} (tick ${tick}/${totalTicks})`, cumPnl, trades, equityCurve })
       }
     }
 
@@ -144,7 +148,7 @@ async function runBacktest(dates: string[], params: Params, onProgress: (u: { pc
       equityCurve.push({ tick: equityCurve.length, pnl: cumPnl })
     }
 
-    if (di % 10 === 0) onProgress({ pct: ((di + 1) / dates.length) * 100, msg: `Processed ${dates[di]} (${di + 1}/${dates.length})`, cumPnl, trades, equityCurve })
+    onProgress({ pct: ((di + 1) / dates.length) * 100, msg: `Done ${dates[di]} (${di + 1}/${dates.length})${tradeTakenThisDay ? ` - ${trades[trades.length-1].exitReason} $${trades[trades.length-1].pnl.toFixed(2)}` : ' - no trade'}`, cumPnl, trades, equityCurve })
   }
 
   const pnls = trades.map(t => t.pnl)
