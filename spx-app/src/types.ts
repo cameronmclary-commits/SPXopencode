@@ -61,3 +61,16 @@ export interface PaperTrade {
   entryTick?: number
   exitTick?: number
 }
+
+export interface ChainSnapshot {
+  time: string
+  spot: number
+  chain: OptionRow[]
+}
+
+export interface PlaybackSession {
+  id: string
+  date: string
+  snapshots: ChainSnapshot[]
+  dailyChange: number
+}

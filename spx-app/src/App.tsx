@@ -10,9 +10,10 @@ import HistoricalTab from './components/HistoricalTab'
 import BacktestTab from './components/BacktestTab'
 import LiveTab from './components/LiveTab'
 import PreMarket from './components/PreMarket'
+import PlaybackTab from './components/PlaybackTab'
 import ErrorBoundary from './components/shared/ErrorBoundary'
 
-type Tab = 'overview' | 'chain' | 'scanner' | 'lab' | 'monitoring' | 'historical' | 'premarket' | 'backtest' | 'live'
+type Tab = 'overview' | 'chain' | 'scanner' | 'lab' | 'monitoring' | 'historical' | 'premarket' | 'backtest' | 'live' | 'playback'
 
 const tabs: { id: Tab; label: string }[] = [
   { id: 'overview', label: 'Overview' },
@@ -20,6 +21,7 @@ const tabs: { id: Tab; label: string }[] = [
   { id: 'scanner', label: 'Scanner' },
   { id: 'lab', label: 'Trade Lab' },
   { id: 'backtest', label: 'Backtest' },
+  { id: 'playback', label: 'Playback' },
   { id: 'live', label: 'Live' },
   { id: 'monitoring', label: 'Monitor' },
   { id: 'historical', label: 'Historical' },
@@ -127,6 +129,7 @@ export default function App() {
           {tab === 'scanner' && <TradeScanner date={selectedDate} chain={sessionData?.openingChain || []} spotPrice={sessionData?.spotPrice || 0} />}
           {tab === 'lab' && <TradeLab selectedDate={selectedDate} />}
           {tab === 'backtest' && <BacktestTab sessions={sessions} />}
+          {tab === 'playback' && <PlaybackTab sessions={sessions} />}
           {tab === 'live' && <LiveTab />}
           {tab === 'monitoring' && <Monitoring />}
           {tab === 'historical' && <HistoricalTab sessions={sessions} />}

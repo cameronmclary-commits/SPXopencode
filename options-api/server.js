@@ -167,6 +167,50 @@ app.get('/api/chain/:date', async (req, res) => {
   }
 });
 
+app.get('/api/sessions/:date/snapshots', async (req, res) => {
+  try {
+    const { date } = req.params;
+    const rows = await loadDateParquet(date);
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({ error: 'No data for ' + date });
+    }
+
+    const session = buildSessionFromRows(rows, date);
+    if (!session) return res.status(404).json({ error: 'No data for ' + date });
+
+    const spotPrice = rows[0].S || 0;
+    const ds = rows[0]?.ds || 0;
+
+    const chain = rows
+      .filter(r => r.K && r.option)
+      .map(r => ({
+        strike: r.K,
+        type: r.option === 'call' ? 'call' : 'put',
+        bid: r.bid || 0,
+        ask: r.ask || 0,
+        mid: r.mid || 0,
+        last: r.last || r.mid || 0,
+        volume: r.volume || 0,
+        openInterest: r.open_int || 0,
+        delta: r.bsdelta != null ? Math.round(r.bsdelta * 1000) / 1000 : undefined,
+        gamma: r.bsgamma != null ? Math.round(r.bsgamma * 10000) / 10000 : undefined,
+        theta: r.bstheta != null ? Math.round(r.bstheta * 100) / 100 : undefined,
+        vega: r.bs_vega != null ? Math.round(r.bs_vega * 1000) / 1000 : undefined,
+        iv: r.bsiv != null ? Math.round(r.bsiv * 10000) / 10000 : undefined,
+      }));
+
+    const snapshots = session.pricePath.map(p => ({
+      time: p.time,
+      spot: p.price,
+      chain: chain,
+    }));
+
+    res.json({ snapshots, dailyChange: ds });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 let liveData = { chain: null, spot: 0, pricePath: [], startTime: Date.now() }
 let liveActive = false
 
