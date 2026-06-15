@@ -3,7 +3,7 @@ import type { SessionData, OptionRow } from '../types'
 import { fetchSession } from '../api'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, ReferenceLine } from 'recharts'
 import { surfacePrice, numericDelta } from '../utils/pricing'
-import { ComboLeg, evalCombo } from '../utils/combos'
+import { type ComboLeg, evalCombo } from '../utils/combos'
 import { ParamInput, TimeInput, MetricCard } from './shared/UI'
 
 interface BacktestTrade {

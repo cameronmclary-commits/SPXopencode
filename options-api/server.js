@@ -57,23 +57,27 @@ function buildSessionFromRows(rows, dateStr) {
 
   chain.sort((a, b) => a.strike - b.strike);
 
-  const ds = rows[0]?.ds || 0;
-  const open = spotPrice - ds;
-  const close = spotPrice;
+  // Estimate daily range from option implied volatility
+  // Find the closest non-0DTE option with BSIV to estimate daily volatility
+  let iv = 0.15; // default 15% annualized
+  const nonZeroDte = sourceRows.filter(r => r.dte > 0 && r.bsiv != null && r.bsiv > 0);
+  if (nonZeroDte.length > 0) {
+    nonZeroDte.sort((a, b) => a.dte - b.dte);
+    iv = nonZeroDte[0].bsiv;
+  }
+  const dailyVol = spotPrice * iv / Math.sqrt(252);
+  const dailyRange = dailyVol * 2.5; // typical range ≈ 2.5 × daily SD
 
+  let low = spotPrice - dailyRange / 2;
+  let high = spotPrice + dailyRange / 2;
+
+  // Use parquet low/high if available and non-zero (underlying daily range)
   const calls = rows.filter(r => r.option === 'call' && r.K);
   calls.sort((a, b) => Math.abs(a.K - spotPrice) - Math.abs(b.K - spotPrice));
   const atmCall = calls[0];
-
-  let low, high;
-  if (atmCall && atmCall.low && atmCall.high && atmCall.high > atmCall.low) {
-    const optionRange = atmCall.high - atmCall.low;
-    const estimatedMove = optionRange * 2;
-    low = spotPrice - estimatedMove / 2;
-    high = spotPrice + estimatedMove / 2;
-  } else {
-    low = Math.min(open, close);
-    high = Math.max(open, close);
+  if (atmCall && atmCall.low > 0 && atmCall.high > atmCall.low) {
+    low = atmCall.low;
+    high = atmCall.high;
   }
 
   const pricePath = [];
@@ -82,7 +86,7 @@ function buildSessionFromRows(rows, dateStr) {
     { t: 0, v: spotPrice },
     { t: 0.2, v: high },
     { t: 0.65, v: low },
-    { t: 1, v: close },
+    { t: 1, v: spotPrice },
   ]
   for (let i = 0; i <= steps; i++) {
     const pct = i / steps;
@@ -112,8 +116,8 @@ function buildSessionFromRows(rows, dateStr) {
     hasZeroDte: zeroDteRows.length > 0,
     dailyLow: low,
     dailyHigh: high,
-    dailyClose: close,
-    dailyChange: ds,
+    dailyClose: spotPrice,
+    dailyChange: 0,
   };
 }
 

@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
-import type { OptionRow } from '../types'
+import type { OptionRow, ChainSnapshot, SessionInfo } from '../types'
 import { surfacePrice } from '../utils/pricing'
-import { ComboLeg, findBestCombo } from '../utils/combos'
+import type { ComboLeg } from '../utils/combos'
+import { findBestCombo } from '../utils/combos'
 import { ParamInput } from './shared/UI'
+import { usePlayback, type PlaybackSpeed } from '../hooks/usePlayback'
 
 interface LiveStatus {
   connected: boolean; authenticated: boolean; active: boolean
@@ -60,7 +62,7 @@ function saveApiBase(url: string) {
   try { localStorage.setItem(API_KEY, url) } catch (e) { console.warn('Failed to save API URL:', e) }
 }
 
-export default function LiveTab() {
+export default function LiveTab({ sessions }: { sessions?: SessionInfo[] }) {
   const [status, setStatus] = useState<LiveStatus | null>(null)
   const [chain, setChain] = useState<OptionRow[]>([])
   const [spot, setSpot] = useState(0)
@@ -83,6 +85,11 @@ export default function LiveTab() {
   const [tpPoints, setTpPoints] = useState(3)
   const [slPoints, setSlPoints] = useState(1.5)
 
+  const [mode, setMode] = useState<'live' | 'replay'>('replay')
+  const [replayDate, setReplayDate] = useState(sessions?.[0]?.date || '')
+  const [replaySnapshots, setReplaySnapshots] = useState<ChainSnapshot[]>([])
+  const replayPb = usePlayback(replaySnapshots)
+
   const chainRef = useRef(chain)
   const spotRef = useRef(spot)
   chainRef.current = chain
@@ -103,6 +110,45 @@ export default function LiveTab() {
 
   useEffect(() => { savePersistedTrades(openTrades) }, [openTrades])
   useEffect(() => { saveApiBase(liveApiBase) }, [liveApiBase])
+
+  useEffect(() => {
+    if (mode !== 'replay' || !replayDate) return
+    setChain([])
+    setSpot(0)
+    setError('')
+    fetch(`/api/sessions/${replayDate}/snapshots`)
+      .then(r => r.json())
+      .then(data => {
+        setReplaySnapshots(data.snapshots || [])
+        if (!data.snapshots?.length) setError('No snapshots for ' + replayDate)
+      })
+      .catch(() => { setError('Failed to load snapshots'); setReplaySnapshots([]) })
+  }, [mode, replayDate])
+
+  useEffect(() => {
+    if (mode !== 'replay' || !replayPb.current) return
+    setChain(replayPb.current.chain)
+    setSpot(replayPb.current.spot)
+  }, [mode, replayPb.current])
+
+  useEffect(() => {
+    if (mode !== 'replay' || openTrades.length === 0 || chain.length === 0) return
+    const baseSpot = replaySnapshots[0]?.spot || spot
+    const priceShift = spot - baseSpot
+    const idsToClose: string[] = []
+    const updated = openTrades.map(t => {
+      const val = t.legs.reduce((sum, l) => sum + l.quantity * surfacePrice(chain, l.strike, l.type, priceShift, false, spot), 0)
+      const pnl = val - t.entryCost
+      const pnlPct = t.entryCost > 0 ? (pnl / t.entryCost) * 100 : 0
+      if (t.entryTp > 0 && pnl >= t.entryTp) idsToClose.push(t.id)
+      if (t.entrySl > 0 && pnl <= -t.entrySl) idsToClose.push(t.id)
+      return { ...t, pnl, pnlPct }
+    })
+    setOpenTrades(updated)
+    if (idsToClose.length > 0) {
+      setTimeout(() => setOpenTrades(prev => prev.filter(t => !idsToClose.includes(t.id))), 0)
+    }
+  }, [mode, replayPb.current, openTrades.length, chain.length])
 
   async function pollLoop() {
     while (!stoppedRef.current) {
@@ -186,6 +232,7 @@ export default function LiveTab() {
   async function acceptTrade(trade: SuggestedTrade) {
     const ok = window.confirm(
       `Place trade?\n\n` +
+      (mode === 'replay' ? `(REPLAY) ${replayDate} ${replayPb.current?.time}\n\n` : '') +
       `Type: ${trade.type}\n` +
       `Template: ${trade.templatePts} pts\n` +
       `Cost: ${trade.totalCost.toFixed(2)} pts\n` +
@@ -195,6 +242,23 @@ export default function LiveTab() {
     if (!ok) return
 
     setPlacing(trade.id)
+
+    if (mode === 'replay') {
+      const ot: OpenTrade = {
+        id: trade.id,
+        legs: trade.legs,
+        entryCost: trade.totalCost,
+        entrySpot: spot,
+        entryTime: (replayPb.current?.time || '') + ' ' + replayDate,
+        pnl: 0, pnlPct: 0,
+        entryTp: tpPoints, entrySl: slPoints,
+      }
+      setOpenTrades(prev => [...prev, ot])
+      setRejectedIds(prev => new Set([...prev, trade.id]))
+      setPlacing(null)
+      return
+    }
+
     if (!accountId) {
       setError('No IBKR account ID available')
       setPlacing(null)
@@ -240,6 +304,11 @@ export default function LiveTab() {
   }
 
   async function closeTrade(trade: OpenTrade) {
+    if (mode === 'replay') {
+      setOpenTrades(prev => prev.filter(t => t.id !== trade.id))
+      setClosingIds(prev => new Set([...prev].filter(id => id !== trade.id)))
+      return
+    }
     if (!accountId) { setError('No IBKR account ID'); return }
     const results: { ok: boolean; leg: string }[] = []
     for (const leg of trade.legs) {
@@ -269,45 +338,110 @@ export default function LiveTab() {
   const currentHHMM = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
   const inSession = currentHHMM >= sessionStart && currentHHMM <= sessionEnd
 
-  if (!status) {
-    return (
-      <div className="panel-bg border border-zborder rounded-lg p-8 text-center animate-fade-in">
-        <div className="text-ztextdim text-sm animate-pulse">Connecting to IB Gateway...</div>
-        <div className="mt-2 text-xs text-ztextdim">Ensure TWS/IB Gateway is running on port 5000 with API enabled.</div>
-      </div>
-    )
-  }
-
-  if (!status.connected) {
-    return (
-      <div className="panel-bg border border-zborder rounded-lg p-8 text-center animate-fade-in">
-        <div className="text-zred text-sm font-medium mb-2">IB Gateway Not Reachable</div>
-        <div className="text-xs text-ztextdim">Start TWS or IB Gateway on port 5000 and enable API connections.</div>
-        <button onClick={() => window.location.reload()} className="mt-4 px-3 py-1 text-xs rounded bg-zcyan/20 text-zcyan border border-zcyan hover:bg-zcyan/30 transition-all duration-200">Retry</button>
-      </div>
-    )
-  }
-
-  if (!status.authenticated) {
-    return (
-      <div className="panel-bg border border-zborder rounded-lg p-8 text-center animate-fade-in">
-        <div className="text-zyellow text-sm font-medium mb-2">Not Authenticated</div>
-        <div className="text-xs text-ztextdim">Log in to TWS or IB Gateway.</div>
-        <button onClick={() => window.location.reload()} className="mt-4 px-3 py-1 text-xs rounded bg-zcyan/20 text-zcyan border border-zcyan hover:bg-zcyan/30 transition-all duration-200">Retry</button>
-      </div>
-    )
+  if (mode === 'live') {
+    if (!status) {
+      return (
+        <div className="panel-bg border border-zborder rounded-lg p-8 text-center animate-fade-in">
+          <div className="text-ztextdim text-sm animate-pulse">Connecting to IB Gateway...</div>
+          <div className="mt-2 text-xs text-ztextdim">Ensure TWS/IB Gateway is running on port 5000 with API enabled.</div>
+        </div>
+      )
+    }
+    if (!status.connected) {
+      return (
+        <div className="panel-bg border border-zborder rounded-lg p-8 text-center animate-fade-in">
+          <div className="text-zred text-sm font-medium mb-2">IB Gateway Not Reachable</div>
+          <div className="text-xs text-ztextdim">Start TWS or IB Gateway on port 5000 and enable API connections.</div>
+          <button onClick={() => window.location.reload()} className="mt-4 px-3 py-1 text-xs rounded bg-zcyan/20 text-zcyan border border-zcyan hover:bg-zcyan/30 transition-all duration-200">Retry</button>
+        </div>
+      )
+    }
+    if (!status.authenticated) {
+      return (
+        <div className="panel-bg border border-zborder rounded-lg p-8 text-center animate-fade-in">
+          <div className="text-zyellow text-sm font-medium mb-2">Not Authenticated</div>
+          <div className="text-xs text-ztextdim">Log in to TWS or IB Gateway.</div>
+          <button onClick={() => window.location.reload()} className="mt-4 px-3 py-1 text-xs rounded bg-zcyan/20 text-zcyan border border-zcyan hover:bg-zcyan/30 transition-all duration-200">Retry</button>
+        </div>
+      )
+    }
   }
 
   return (
     <div className="space-y-4">
       <div className="panel-bg border border-zborder rounded-lg p-4 animate-fade-in">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-medium text-ztextdim tracking-wide">Live Trading — IBKR Paper</h3>
-          <div className="flex items-center gap-2">
-            <span className={`w-2 h-2 rounded-full ${status.active ? 'bg-zgreen animate-pulse' : 'bg-ztextdim'}`} />
-            <span className="text-xs text-zgreen">{status.active ? 'LIVE' : 'Standby'}</span>
+          <div className="flex items-center gap-3">
+            <h3 className="text-sm font-medium text-ztextdim tracking-wide">{mode === 'live' ? 'Live Trading' : 'Replay Trading'}</h3>
+            <div className="flex gap-1 border border-zborder rounded p-0.5">
+              <button onClick={() => setMode('replay')}
+                className={`px-2 py-0.5 text-[10px] rounded ${mode === 'replay' ? 'bg-zcyan/20 text-zcyan' : 'text-ztextdim hover:text-ztext'}`}>Replay</button>
+              <button onClick={() => setMode('live')}
+                className={`px-2 py-0.5 text-[10px] rounded ${mode === 'live' ? 'bg-zcyan/20 text-zcyan' : 'text-ztextdim hover:text-ztext'}`}>Live</button>
+            </div>
           </div>
+          {mode === 'live' ? (
+            <div className="flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full ${status?.active ? 'bg-zgreen animate-pulse' : 'bg-ztextdim'}`} />
+              <span className="text-xs text-zgreen">{status?.active ? 'LIVE' : 'Standby'}</span>
+            </div>
+          ) : replayPb.total > 0 && (
+            <div className="flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full ${replayPb.playing ? 'bg-zgreen animate-pulse' : 'bg-zyellow'}`} />
+              <span className="text-xs text-ztextdim">{replayPb.playing ? 'PLAYING' : 'PAUSED'}</span>
+            </div>
+          )}
         </div>
+
+        {mode === 'replay' && (
+          <div className="space-y-3">
+            {sessions && (
+              <div className="flex items-center gap-2">
+                <label className="text-[10px] text-ztextdim tracking-wide uppercase">Session</label>
+                <select value={replayDate} onChange={e => setReplayDate(e.target.value)}
+                  className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext">
+                  {sessions.map(s => <option key={s.date} value={s.date}>{s.date}</option>)}
+                </select>
+                {replayPb.total === 0 && <span className="text-[10px] text-ztextdim animate-pulse">loading...</span>}
+              </div>
+            )}
+
+            {replayPb.total > 0 && (
+              <>
+                <div className="flex items-center gap-4">
+                  <div className="flex items-center gap-1">
+                    <button onClick={replayPb.toggle}
+                      className="px-3 py-1 text-xs rounded border border-zcyan text-zcyan hover:bg-zcyan/10">{replayPb.playing ? '⏸' : '▶'}</button>
+                    <button onClick={replayPb.seekToStart} disabled={replayPb.atStart}
+                      className="px-2 py-1 text-[10px] rounded border border-zborder text-ztextdim hover:text-ztext disabled:opacity-30">⏮</button>
+                    <button onClick={replayPb.stepBack} disabled={replayPb.atStart}
+                      className="px-2 py-1 text-[10px] rounded border border-zborder text-ztextdim hover:text-ztext disabled:opacity-30">◀</button>
+                    <button onClick={replayPb.stepForward} disabled={replayPb.atEnd}
+                      className="px-2 py-1 text-[10px] rounded border border-zborder text-ztextdim hover:text-ztext disabled:opacity-30">▶▶</button>
+                    <button onClick={replayPb.seekToEnd} disabled={replayPb.atEnd}
+                      className="px-2 py-1 text-[10px] rounded border border-zborder text-ztextdim hover:text-ztext disabled:opacity-30">⏭</button>
+                  </div>
+                  {([0.5, 1, 2, 5, 10, 25] as PlaybackSpeed[]).map(s => (
+                    <button key={s} onClick={() => replayPb.setSpeed(s)}
+                      className={`px-2 py-1 text-[10px] rounded border ${replayPb.speed === s ? 'border-zcyan text-zcyan bg-zcyan/10' : 'border-zborder text-ztextdim hover:text-ztext'}`}>{s}x</button>
+                  ))}
+                  <span className="text-[10px] text-ztextdim font-mono">{replayPb.current?.time || '—'} ({replayPb.index + 1}/{replayPb.total})</span>
+                </div>
+
+                <div className="relative h-5 bg-zgray/30 rounded cursor-pointer"
+                  onClick={e => {
+                    const rect = e.currentTarget.getBoundingClientRect()
+                    const pct = (e.clientX - rect.left) / rect.width
+                    replayPb.seek(Math.round(pct * (replayPb.total - 1)))
+                  }}>
+                  <div className="absolute top-0 left-0 h-full bg-zcyan/20 rounded-l" style={{ width: `${replayPb.progress * 100}%` }} />
+                  <div className="absolute top-0 h-full w-0.5 bg-zcyan" style={{ left: `${replayPb.progress * 100}%` }} />
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         <div className="flex flex-wrap gap-6">
           <div>
             <div className="text-[10px] text-ztextdim tracking-wide uppercase">SPX</div>
@@ -317,14 +451,16 @@ export default function LiveTab() {
             <div className="text-[10px] text-ztextdim tracking-wide uppercase">Chain</div>
             <div className="text-sm font-mono text-white">{chain.length} strikes</div>
           </div>
+          {mode === 'live' && (
           <div>
             <div className="text-[10px] text-ztextdim tracking-wide uppercase">Account</div>
             <div className="text-sm font-mono text-ztextdim">{accountId ? accountId.slice(0, 12) + '...' : '—'}</div>
           </div>
+          )}
           <div>
             <div className="text-[10px] text-ztextdim tracking-wide uppercase">Session</div>
             <div className={`text-sm font-mono ${inSession ? 'text-zgreen' : 'text-ztextdim'}`}>
-              {currentHHMM} {inSession ? '(active)' : '(closed)'}
+              {mode === 'replay' ? (replayPb.current?.time || '—') : currentHHMM} {inSession ? '(active)' : ''}
             </div>
           </div>
         </div>
@@ -344,6 +480,7 @@ export default function LiveTab() {
             <input type="time" value={sessionEnd} onChange={e => setSessionEnd(e.target.value)} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext" />
           </div>
         </div>
+        {mode === 'live' && (
         <div className="flex flex-wrap gap-4 mt-3 pt-3 border-t border-zborder items-center">
           <div className="flex-1 min-w-0">
             <label className="text-xs text-ztextdim tracking-wide uppercase">Live API URL</label>
@@ -360,6 +497,7 @@ export default function LiveTab() {
             Reset
           </button>
         </div>
+        )}
         {error && <div className="mt-2 text-xs text-zred">{error}</div>}
       </div>
 

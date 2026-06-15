@@ -149,8 +149,8 @@ export default function Overview({ data, loading }: Props) {
                 </linearGradient>
               </defs>
               <XAxis dataKey="time" tick={{ fontSize: 10, fill: '#6b7280' }} interval={5} />
-              <YAxis yAxisId="price" domain={['dataMin - 3', 'dataMax + 3']} tick={{ fontSize: 10, fill: '#6b7280' }} />
-              <YAxis yAxisId="opt" orientation="right" domain={[0, 'dataMax + 1']} tick={{ fontSize: 10, fill: '#6b7280' }} />
+              <YAxis yAxisId="price" domain={['dataMin', 'dataMax']} tick={{ fontSize: 10, fill: '#6b7280' }} padding={{ top: 20, bottom: 20 }} />
+              <YAxis yAxisId="opt" orientation="right" domain={[0, 'dataMax']} tick={{ fontSize: 10, fill: '#6b7280' }} padding={{ top: 20, bottom: 0 }} />
               <Tooltip
                 contentStyle={{ background: '#1a1a2e', border: '1px solid #2a2a4a', borderRadius: 8, fontSize: 12 }}
                 labelStyle={{ color: '#c4c4d4', fontWeight: 600 }}

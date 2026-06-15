@@ -42,7 +42,7 @@ export default function HistoricalTab({ sessions }: Props) {
         <ResponsiveContainer width="100%" height={250}>
           <LineChart data={dailyData}>
             <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#6b7280' }} />
-            <YAxis domain={['dataMin - 20', 'dataMax + 20']} tick={{ fontSize: 10, fill: '#6b7280' }} />
+            <YAxis domain={['dataMin', 'dataMax']} tick={{ fontSize: 10, fill: '#6b7280' }} padding={{ top: 20, bottom: 20 }} />
             <Tooltip
               contentStyle={{ background: '#1a1a2e', border: '1px solid #2a2a4a', borderRadius: 8, fontSize: 12 }}
             />

@@ -130,7 +130,7 @@ export default function App() {
           {tab === 'lab' && <TradeLab selectedDate={selectedDate} />}
           {tab === 'backtest' && <BacktestTab sessions={sessions} />}
           {tab === 'playback' && <PlaybackTab sessions={sessions} />}
-          {tab === 'live' && <LiveTab />}
+          {tab === 'live' && <LiveTab sessions={sessions} />}
           {tab === 'monitoring' && <Monitoring />}
           {tab === 'historical' && <HistoricalTab sessions={sessions} />}
           {tab === 'premarket' && <PreMarket />}
