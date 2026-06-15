@@ -16,6 +16,7 @@ interface SuggestedTrade {
   legs: ComboLeg[]
   totalCost: number; score: number
   pnlPos: number; pnlNeg: number
+  templatePts: number
 }
 
 interface OpenTrade {
@@ -33,6 +34,7 @@ function findSuggestions(chain: OptionRow[], spot: number, maxCost: number, temp
     score: r.score,
     pnlPos: r.pnlPos,
     pnlNeg: r.pnlNeg,
+    templatePts: templateMove,
   }))
 }
 
@@ -230,10 +232,12 @@ export default function LiveTab({ sessions }: { sessions?: SessionInfo[] }) {
   }, [closingIds])
 
   async function acceptTrade(trade: SuggestedTrade) {
+    const hasCallLeg = trade.legs.some(l => l.type === 'call')
+    const legTypes = hasCallLeg ? 'CALL' : 'PUT'
     const ok = window.confirm(
       `Place trade?\n\n` +
       (mode === 'replay' ? `(REPLAY) ${replayDate} ${replayPb.current?.time}\n\n` : '') +
-      `Type: ${trade.type}\n` +
+      `Type: ${legTypes}\n` +
       `Template: ${trade.templatePts} pts\n` +
       `Cost: ${trade.totalCost.toFixed(2)} pts\n` +
       `Legs:\n` +

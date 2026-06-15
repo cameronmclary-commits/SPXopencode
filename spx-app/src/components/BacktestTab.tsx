@@ -2,7 +2,7 @@ import { useState, useRef, useMemo, useCallback } from 'react'
 import type { SessionData, OptionRow } from '../types'
 import { fetchSession } from '../api'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, ReferenceLine } from 'recharts'
-import { surfacePrice, numericDelta } from '../utils/pricing'
+import { surfacePrice, getConsecutiveGroups } from '../utils/pricing'
 import { type ComboLeg, evalCombo } from '../utils/combos'
 import { ParamInput, TimeInput, MetricCard } from './shared/UI'
 
@@ -66,19 +66,22 @@ function findBestCombo(chain: OptionRow[], spot: number, maxCost: number, templa
   return best
 }
 
-async function runBacktest(dates: string[], params: Params, onProgress: (pct: number, msg: string) => void): Promise<BacktestResult> {
+async function runBacktest(dates: string[], params: Params, onProgress: (u: { pct: number; msg: string; cumPnl: number; trades: BacktestTrade[]; equityCurve: { tick: number; pnl: number }[] }) => void): Promise<BacktestResult> {
   const trades: BacktestTrade[] = []
   const equityCurve: { tick: number; pnl: number }[] = []
   let cumPnl = 0
 
+  const tradesTakenThisDay = new Set<string>()
+
   for (let di = 0; di < dates.length; di++) {
-    onProgress((di / dates.length) * 100, `Loading ${dates[di]}...`)
+    onProgress({ pct: (di / dates.length) * 100, msg: `Loading ${dates[di]}...`, cumPnl, trades, equityCurve })
     let session: SessionData
     try { session = await fetchSession(dates[di]) } catch { continue }
 
     const totalTicks = session.pricePath.length
     const baseSpot = session.pricePath[0].price
     let openTrade: { trade: BacktestTrade; legs: ComboLeg[]; entryTick: number } | null = null
+    let tradeTakenThisDay = false
 
     let nextScanMin = -1
     for (let tick = 0; tick < totalTicks; tick++) {
@@ -86,7 +89,7 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
       const tickTime = session.pricePath[tick].time
       const tickMin = timeToMinutes(tickTime)
 
-      if (!openTrade && tickMin >= nextScanMin && timeInRange(tickTime, params.sessionStart, params.sessionEnd)) {
+      if (!openTrade && !tradeTakenThisDay && tickMin >= nextScanMin && timeInRange(tickTime, params.sessionStart, params.sessionEnd)) {
         const pos = findBestCombo(session.openingChain, spot, params.maxCost, params.templateMove, params.minPnl, params.minDelta)
         if (pos) {
           const trade: BacktestTrade = {
@@ -97,6 +100,7 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
             pnl: 0, pnlPct: 0, exitReason: '', score: pos.score,
           }
           openTrade = { trade, legs: pos.legs, entryTick: tick }
+          tradeTakenThisDay = true
           nextScanMin = tickMin + params.scanInterval
         }
       }
@@ -140,7 +144,7 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
       equityCurve.push({ tick: equityCurve.length, pnl: cumPnl })
     }
 
-    if (di % 10 === 0) onProgress(((di + 1) / dates.length) * 100, `Processed ${dates[di]} (${di + 1}/${dates.length})`)
+    if (di % 10 === 0) onProgress({ pct: ((di + 1) / dates.length) * 100, msg: `Processed ${dates[di]} (${di + 1}/${dates.length})`, cumPnl, trades, equityCurve })
   }
 
   const pnls = trades.map(t => t.pnl)
@@ -162,7 +166,7 @@ async function runBacktest(dates: string[], params: Params, onProgress: (pct: nu
   const stdR = Math.sqrt(returns.reduce((s, r) => s + (r - avgR) ** 2, 0) / (returns.length || 1))
   const sharpe = stdR > 0 ? avgR / stdR : 0
 
-  onProgress(100, `Complete — ${trades.length} trades`)
+  onProgress({ pct: 100, msg: `Complete — ${trades.length} trades`, cumPnl, trades, equityCurve })
   return { trades, equityCurve, metrics: { totalTrades: trades.length, winRate, avgPnl, medPnl, avgWin, avgLoss, maxDrawdown, profitFactor, sharpe, totalPnl: cumPnl, avgBarsHeld } }
 }
 
@@ -188,7 +192,8 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState(0)
   const [progressMsg, setProgressMsg] = useState('')
-  const [result, setResult] = useState<BacktestResult | null>(null)
+  const [liveEquity, setLiveEquity] = useState<{ tick: number; pnl: number }[]>([])
+  const [liveTrades, setLiveTrades] = useState<BacktestTrade[]>([])
   const canceledRef = useRef(false)
 
   const updateParam = useCallback(<K extends keyof Params>(k: K, v: Params[K]) => {
@@ -211,15 +216,20 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
   }
 
   const handleRun = async () => {
-    setRunning(true); setProgress(0); setProgressMsg('Starting...'); setResult(null)
+    setRunning(true); setProgress(0); setProgressMsg('Starting...')
+    setLiveEquity([]); setLiveTrades([])
     canceledRef.current = false
     const dates = mode === 'range' ? rangeDates.slice(0, 50) : [...selectedDates].sort()
     if (dates.length === 0) { setRunning(false); return }
 
-    const res = await runBacktest(dates, params, (pct, msg) => {
-      if (!canceledRef.current) { setProgress(pct); setProgressMsg(msg) }
+    const res = await runBacktest(dates, params, (u) => {
+      if (!canceledRef.current) {
+        setProgress(u.pct); setProgressMsg(u.msg)
+        setLiveEquity([...u.equityCurve])
+        setLiveTrades([...u.trades])
+      }
     })
-    if (!canceledRef.current) setResult(res)
+    if (!canceledRef.current) { setLiveEquity(res.equityCurve); setLiveTrades(res.trades) }
     setRunning(false)
   }
 
@@ -236,7 +246,7 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
         {mode === 'range' ? (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <ParamInput label="Max Cost (pts)" value={params.maxCost} onChange={v => updateParam('maxCost', v)} min={5} max={200} step={5} />
-            <ParamInput label="Scan Every (min)" value={params.scanInterval} onChange={v => updateParam('scanInterval', v)} min={1} max={30} step={1} />
+            <ParamInput label="Scan Every (min)" value={params.scanInterval} onChange={v => updateParam('scanInterval', v)} min={0.1} max={30} step={0.1} />
             <ParamInput label="TP (pts)" value={params.tpPoints} onChange={v => updateParam('tpPoints', v)} min={0.5} max={10} step={0.5} />
             <ParamInput label="SL (pts)" value={params.slPoints} onChange={v => updateParam('slPoints', v)} min={0.5} max={10} step={0.5} />
             <ParamInput label="Template (pts)" value={params.templateMove} onChange={v => updateParam('templateMove', v)} min={5} max={20} step={2.5} />
@@ -249,6 +259,7 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
               <select value={yearStart} onChange={e => { setYearStart(Number(e.target.value)); setYearEnd(Number(e.target.value) + 1) }} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext">
                 <option value={2024}>2024</option>
                 <option value={2025}>2025</option>
+                <option value={2026}>2026</option>
               </select>
             </div>
           </div>
@@ -256,7 +267,7 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
           <>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <ParamInput label="Max Cost (pts)" value={params.maxCost} onChange={v => updateParam('maxCost', v)} min={5} max={200} step={5} />
-              <ParamInput label="Scan Every (min)" value={params.scanInterval} onChange={v => updateParam('scanInterval', v)} min={1} max={30} step={1} />
+              <ParamInput label="Scan Every (min)" value={params.scanInterval} onChange={v => updateParam('scanInterval', v)} min={0.1} max={30} step={0.1} />
               <ParamInput label="TP (pts)" value={params.tpPoints} onChange={v => updateParam('tpPoints', v)} min={0.5} max={10} step={0.5} />
               <ParamInput label="SL (pts)" value={params.slPoints} onChange={v => updateParam('slPoints', v)} min={0.5} max={10} step={0.5} />
             </div>
@@ -270,8 +281,8 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
             <div className="mt-3 flex flex-wrap gap-2 items-center">
               <span className="text-xs text-ztextdim">Select dates ({selectedDates.size} of {sessions.length}):</span>
               <button onClick={() => setSelectedDates(new Set(sessions.map(s => s.date)))} className="text-xs px-2 py-0.5 rounded bg-zgray border border-zborder text-ztextdim hover:text-ztext">All</button>
-              <button onClick={() => setSelectedDates(new Set(sessions.slice(0, 30).map(s => s.date)))} className="text-xs px-2 py-0.5 rounded bg-zgray border border-zborder text-ztextdim hover:text-ztext">Last 30</button>
-              <button onClick={() => setSelectedDates(new Set(sessions.slice(0, 10).map(s => s.date)))} className="text-xs px-2 py-0.5 rounded bg-zgray border border-zborder text-ztextdim hover:text-ztext">Last 10</button>
+              <button onClick={() => setSelectedDates(new Set(sessions.slice(-30).map(s => s.date)))} className="text-xs px-2 py-0.5 rounded bg-zgray border border-zborder text-ztextdim hover:text-ztext">Last 30</button>
+              <button onClick={() => setSelectedDates(new Set(sessions.slice(-10).map(s => s.date)))} className="text-xs px-2 py-0.5 rounded bg-zgray border border-zborder text-ztextdim hover:text-ztext">Last 10</button>
               <button onClick={() => setSelectedDates(new Set())} className="text-xs px-2 py-0.5 rounded bg-zgray border border-zborder text-ztextdim hover:text-ztext">None</button>
             </div>
             <div className="mt-2 max-h-40 overflow-y-auto border border-zborder rounded">
@@ -306,32 +317,27 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
         )}
       </div>
 
-      {result && (
+      {liveTrades.length > 0 && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-            <MetricCard label="Total Trades" value={result.metrics.totalTrades} />
-            <MetricCard label="Win Rate" value={`${(result.metrics.winRate * 100).toFixed(1)}%`} color={result.metrics.winRate > 0.5 ? 'text-zgreen' : 'text-zred'} />
-            <MetricCard label="Total P&L" value={`${result.metrics.totalPnl.toFixed(2)} pts`} color={result.metrics.totalPnl >= 0 ? 'text-zgreen' : 'text-zred'} />
-            <MetricCard label="Avg P&L" value={`${result.metrics.avgPnl.toFixed(2)} pts`} color={result.metrics.avgPnl >= 0 ? 'text-zgreen' : 'text-zred'} />
-            <MetricCard label="Max DD" value={`${(result.metrics.maxDrawdown * 100).toFixed(1)}%`} color="text-zred" />
-            <MetricCard label="Profit Factor" value={result.metrics.profitFactor.toFixed(2)} />
-            <MetricCard label="Sharpe" value={result.metrics.sharpe.toFixed(2)} color={result.metrics.sharpe > 1 ? 'text-zgreen' : result.metrics.sharpe > 0 ? 'text-zyellow' : 'text-zred'} />
-            <MetricCard label="Avg Win" value={`${result.metrics.avgWin.toFixed(2)} pts`} color="text-zgreen" />
-            <MetricCard label="Avg Loss" value={`${result.metrics.avgLoss.toFixed(2)} pts`} color="text-zred" />
-            <MetricCard label="Avg Bars Held" value={result.metrics.avgBarsHeld.toFixed(1)} />
+            <MetricCard label="Total Trades" value={liveTrades.length} />
+            <MetricCard label="Win Rate" value={`${(liveTrades.filter(t => t.pnl > 0).length / Math.max(liveTrades.length, 1) * 100).toFixed(1)}%`} color={liveTrades.filter(t => t.pnl > 0).length / Math.max(liveTrades.length, 1) > 0.5 ? 'text-zgreen' : 'text-zred'} />
+            <MetricCard label="Total P&L" value={`${liveEquity.length > 0 ? liveEquity[liveEquity.length - 1].pnl.toFixed(2) : '0.00'} pts`} color={liveEquity.length > 0 && liveEquity[liveEquity.length - 1].pnl >= 0 ? 'text-zgreen' : 'text-zred'} />
+            <MetricCard label="Avg P&L" value={`${(liveTrades.reduce((s, t) => s + t.pnl, 0) / Math.max(liveTrades.length, 1)).toFixed(2)} pts`} />
+            <MetricCard label="Max DD" value={`${running ? '...' : '0.0%'}`} />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div className="panel-bg border border-zborder rounded-lg p-4">
-              <h3 className="text-sm font-medium text-ztextdim mb-3">Equity Curve</h3>
+              <h3 className="text-sm font-medium text-ztextdim mb-3">Equity Curve {running && <span className="text-zcyan animate-pulse">●</span>}</h3>
               <ResponsiveContainer width="100%" height={200}>
-                <AreaChart data={result.equityCurve}>
-                  <defs><linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#06b6d4" stopOpacity={0.3} /><stop offset="100%" stopColor="#06b6d4" stopOpacity={0} /></linearGradient></defs>
+                <AreaChart data={liveEquity}>
+                  <defs><linearGradient id="eqGrad2" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#06b6d4" stopOpacity={0.3} /><stop offset="100%" stopColor="#06b6d4" stopOpacity={0} /></linearGradient></defs>
                   <XAxis dataKey="tick" tick={{ fontSize: 10, fill: '#6b7280' }} />
                   <YAxis tick={{ fontSize: 10, fill: '#6b7280' }} />
                   <ReferenceLine y={0} stroke="#2a2a4a" />
                   <Tooltip contentStyle={{ background: '#1a1a2e', border: '1px solid #2a2a4a', borderRadius: 6, fontSize: 11 }} formatter={(v) => [`${Number(v).toFixed(2)}`, 'P&L']} />
-                  <Area type="monotone" dataKey="pnl" stroke="#06b6d4" fill="url(#eqGrad)" strokeWidth={2} />
+                  <Area type="monotone" dataKey="pnl" stroke="#06b6d4" fill="url(#eqGrad2)" strokeWidth={2} />
                 </AreaChart>
               </ResponsiveContainer>
             </div>
@@ -340,7 +346,7 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
               <h3 className="text-sm font-medium text-ztextdim mb-3">P&L Distribution</h3>
               <ResponsiveContainer width="100%" height={200}>
                 <BarChart data={(() => {
-                  const pnls = result.trades.map(t => t.pnl)
+                  const pnls = liveTrades.map(t => t.pnl)
                   const maxP = Math.max(...pnls.map(p => Math.abs(p)), 0.01)
                   const bins = 10; const width = (maxP * 2) / bins
                   const counts = Array(bins).fill(0)
@@ -357,8 +363,9 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
           </div>
 
           <div className="panel-bg border border-zborder rounded-lg overflow-hidden">
-            <div className="px-4 py-2 text-xs font-semibold text-ztextdim border-b border-zborder">
-              Trades ({result.trades.length})
+            <div className="px-4 py-2 text-xs font-semibold text-ztextdim border-b border-zborder flex items-center justify-between">
+              <span>Trades ({liveTrades.length})</span>
+              {running && <span className="text-zcyan animate-pulse text-[10px]">● Live</span>}
             </div>
             <div className="overflow-x-auto max-h-64 overflow-y-auto">
               <table className="w-full text-xs">
@@ -374,7 +381,7 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
                   </tr>
                 </thead>
                 <tbody>
-                  {result.trades.slice(-100).map(t => (
+                  {liveTrades.slice(-100).map(t => (
                     <tr key={t.id} className="border-b border-zborder/50">
                       <td className="px-2 py-1 font-mono">{t.date.slice(5)}</td>
                       <td className="px-2 py-1 font-mono text-xs">

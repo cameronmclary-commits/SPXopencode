@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { listSessions, loadDateParquet, warmCache, fetchAvailableDates } from './data-loader.js';
+import { loadMinuteSnapshots, getOpraDates } from './minute-loader.js';
 import * as ibkr from './ibkr-client.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -12,119 +12,17 @@ const app = express();
 const PORT = process.env.PORT || 3080;
 
 app.use(cors());
-
 app.use(express.static(STATIC_DIR));
 
-let sessionList = listSessions();
-
-// Fetch available dates from GitHub on startup
-fetchAvailableDates().then(dates => {
-  sessionList = listSessions();
-  console.log(`Loaded ${sessionList.length} available dates`);
-});
-
-function buildSessionFromRows(rows, dateStr) {
-  if (!rows || rows.length === 0) return null;
-
-  const spotPrice = rows[0].S || 0;
-  const todayCode = 'SPXW' + dateStr.slice(2, 4) + dateStr.slice(5, 7) + dateStr.slice(8, 10);
-
-  const zeroDteRows = rows.filter(r =>
-    r.option_code && String(r.option_code).startsWith(todayCode)
-  );
-
-  const sourceRows = zeroDteRows.length > 0 ? zeroDteRows : rows;
-
-  const chain = [];
-  for (const r of sourceRows) {
-    if (!r.K || !r.option) continue;
-    chain.push({
-      strike: r.K,
-      type: r.option === 'call' ? 'call' : 'put',
-      bid: r.bid || 0,
-      ask: r.ask || 0,
-      last: r.last || r.mid || 0,
-      mid: r.mid || 0,
-      volume: r.volume || 0,
-      openInterest: r.open_int || 0,
-      delta: r.bsdelta != null ? Math.round(r.bsdelta * 1000) / 1000 : undefined,
-      gamma: r.bsgamma != null ? Math.round(r.bsgamma * 10000) / 10000 : undefined,
-      theta: r.bstheta != null ? Math.round(r.bstheta * 100) / 100 : undefined,
-      vega: r.bs_vega != null ? Math.round(r.bs_vega * 1000) / 1000 : undefined,
-      iv: r.bsiv != null ? Math.round(r.bsiv * 10000) / 10000 : undefined,
-    });
-  }
-
-  chain.sort((a, b) => a.strike - b.strike);
-
-  // Estimate daily range from option implied volatility
-  // Find the closest non-0DTE option with BSIV to estimate daily volatility
-  let iv = 0.15; // default 15% annualized
-  const nonZeroDte = sourceRows.filter(r => r.dte > 0 && r.bsiv != null && r.bsiv > 0);
-  if (nonZeroDte.length > 0) {
-    nonZeroDte.sort((a, b) => a.dte - b.dte);
-    iv = nonZeroDte[0].bsiv;
-  }
-  const dailyVol = spotPrice * iv / Math.sqrt(252);
-  const dailyRange = dailyVol * 2.5; // typical range ≈ 2.5 × daily SD
-
-  let low = spotPrice - dailyRange / 2;
-  let high = spotPrice + dailyRange / 2;
-
-  // Use parquet low/high if available and non-zero (underlying daily range)
-  const calls = rows.filter(r => r.option === 'call' && r.K);
-  calls.sort((a, b) => Math.abs(a.K - spotPrice) - Math.abs(b.K - spotPrice));
-  const atmCall = calls[0];
-  if (atmCall && atmCall.low > 0 && atmCall.high > atmCall.low) {
-    low = atmCall.low;
-    high = atmCall.high;
-  }
-
-  const pricePath = [];
-  const steps = 78;
-  const controlPoints = [
-    { t: 0, v: spotPrice },
-    { t: 0.2, v: high },
-    { t: 0.65, v: low },
-    { t: 1, v: spotPrice },
-  ]
-  for (let i = 0; i <= steps; i++) {
-    const pct = i / steps;
-    const hours = 9.5 + pct * 6.5;
-    const h = Math.floor(hours);
-    const m = Math.floor((hours - h) * 60);
-    const time = String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
-
-    let seg = 0
-    for (let j = 0; j < controlPoints.length - 1; j++) {
-      if (pct >= controlPoints[j].t && pct <= controlPoints[j + 1].t) { seg = j; break }
-    }
-    const cp0 = controlPoints[seg], cp1 = controlPoints[seg + 1]
-    const localT = (pct - cp0.t) / (cp1.t - cp0.t)
-    const smoothT = localT * localT * (3 - 2 * localT)
-    const price = cp0.v + (cp1.v - cp0.v) * smoothT;
-    pricePath.push({ time, price: Math.round(price * 100) / 100 });
-  }
-
-  return {
-    id: dateStr.replace(/-/g, ''),
-    date: dateStr,
-    spotPrice,
-    pricePath,
-    openingChain: chain,
-    chainSize: chain.length,
-    hasZeroDte: zeroDteRows.length > 0,
-    dailyLow: low,
-    dailyHigh: high,
-    dailyClose: spotPrice,
-    dailyChange: 0,
-  };
-}
+const opraDates = getOpraDates();
+const sessionList = opraDates.map(d => ({ date: d, id: d.replace(/-/g, ''), sessionDate: d }));
+console.log(`Loaded ${sessionList.length} OPRA dates`);
 
 app.get('/api/sessions', (req, res) => {
   const list = sessionList.map(s => ({
     id: s.id,
     date: s.date,
+    hasSnapshots: true,
   }));
   res.json({ sessions: list, total: list.length });
 });
@@ -135,10 +33,36 @@ app.get('/api/sessions/:date', async (req, res) => {
     if (!sessionList.some(s => s.date === date)) {
       return res.status(404).json({ error: 'Date not found' });
     }
-    const rows = await loadDateParquet(date);
-    const session = buildSessionFromRows(rows, date);
-    if (!session) return res.status(404).json({ error: 'No data for ' + date });
-    res.json(session);
+
+    const minutes = await loadMinuteSnapshots(date);
+    if (!minutes || minutes.length === 0) {
+      return res.status(404).json({ error: 'No OPRA data for ' + date });
+    }
+
+    const first = minutes[0];
+    const spotPrice = first.spot;
+    const pricePath = minutes
+      .filter(m => m.spot > 0)
+      .map(m => {
+        const t = new Date(m.time + 'Z');
+        const h = (t.getUTCHours() - 4 + 24) % 24;
+        const min = t.getUTCMinutes();
+        return { time: String(h).padStart(2, '0') + ':' + String(min).padStart(2, '0'), price: m.spot };
+      });
+
+    res.json({
+      id: date.replace(/-/g, ''),
+      date,
+      spotPrice,
+      pricePath,
+      openingChain: first.chain,
+      chainSize: first.chain.length,
+      hasZeroDte: true,
+      dailyLow: Math.min(...pricePath.map(p => p.price)),
+      dailyHigh: Math.max(...pricePath.map(p => p.price)),
+      dailyClose: pricePath[pricePath.length - 1].price,
+      dailyChange: Math.round((pricePath[pricePath.length - 1].price - spotPrice) * 100) / 100,
+    });
   } catch (err) {
     console.error('Error:', err.message);
     res.status(500).json({ error: err.message });
@@ -148,24 +72,12 @@ app.get('/api/sessions/:date', async (req, res) => {
 app.get('/api/chain/:date', async (req, res) => {
   try {
     const { date } = req.params;
-    const rows = await loadDateParquet(date);
-    if (!rows || rows.length === 0) {
-      return res.status(404).json({ error: 'No data for ' + date });
+    const minutes = await loadMinuteSnapshots(date);
+    if (!minutes || minutes.length === 0) {
+      return res.status(404).json({ error: 'No OPRA data for ' + date });
     }
-    const spotPrice = rows[0].S || 0;
-    const chain = rows
-      .filter(r => r.K && r.option)
-      .map(r => ({
-        strike: r.K,
-        type: r.option === 'call' ? 'call' : 'put',
-        bid: r.bid || 0,
-        ask: r.ask || 0,
-        mid: r.mid || 0,
-        last: r.last || r.mid || 0,
-        volume: r.volume || 0,
-        openInterest: r.open_int || 0,
-      }));
-    res.json({ date, spotPrice, chainSize: chain.length, chain });
+    const first = minutes[0];
+    res.json({ date, spotPrice: first.spot, chainSize: first.chain.length, chain: first.chain });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -174,43 +86,22 @@ app.get('/api/chain/:date', async (req, res) => {
 app.get('/api/sessions/:date/snapshots', async (req, res) => {
   try {
     const { date } = req.params;
-    const rows = await loadDateParquet(date);
-    if (!rows || rows.length === 0) {
-      return res.status(404).json({ error: 'No data for ' + date });
+    const minutes = await loadMinuteSnapshots(date);
+    if (!minutes || minutes.length === 0) {
+      return res.status(404).json({ error: 'No OPRA data for ' + date });
     }
 
-    const session = buildSessionFromRows(rows, date);
-    if (!session) return res.status(404).json({ error: 'No data for ' + date });
+    const snapshots = minutes.map(m => {
+      const dt = new Date(m.time + 'Z');
+      const etHour = (dt.getUTCHours() - 4 + 24) % 24;
+      const etMin = dt.getUTCMinutes();
+      const time = String(etHour).padStart(2, '0') + ':' + String(etMin).padStart(2, '0');
+      return { time, spot: m.spot, chain: m.chain };
+    });
 
-    const spotPrice = rows[0].S || 0;
-    const ds = rows[0]?.ds || 0;
-
-    const chain = rows
-      .filter(r => r.K && r.option)
-      .map(r => ({
-        strike: r.K,
-        type: r.option === 'call' ? 'call' : 'put',
-        bid: r.bid || 0,
-        ask: r.ask || 0,
-        mid: r.mid || 0,
-        last: r.last || r.mid || 0,
-        volume: r.volume || 0,
-        openInterest: r.open_int || 0,
-        delta: r.bsdelta != null ? Math.round(r.bsdelta * 1000) / 1000 : undefined,
-        gamma: r.bsgamma != null ? Math.round(r.bsgamma * 10000) / 10000 : undefined,
-        theta: r.bstheta != null ? Math.round(r.bstheta * 100) / 100 : undefined,
-        vega: r.bs_vega != null ? Math.round(r.bs_vega * 1000) / 1000 : undefined,
-        iv: r.bsiv != null ? Math.round(r.bsiv * 10000) / 10000 : undefined,
-      }));
-
-    const snapshots = session.pricePath.map(p => ({
-      time: p.time,
-      spot: p.price,
-      chain: chain,
-    }));
-
-    res.json({ snapshots, dailyChange: ds });
+    res.json({ snapshots, dailyChange: 0 });
   } catch (err) {
+    console.error('Snapshots error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -281,10 +172,8 @@ if (process.env.IB_LIVE === 'true') {
   startLiveFeed().catch(err => console.error('Failed to start live feed:', err))
 }
 
-let cacheProgress = { cached: 0, total: sessionList.length, ok: 0 };
-
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', datesAvailable: sessionList.length, cache: cacheProgress });
+  res.json({ status: 'ok', datesAvailable: sessionList.length });
 });
 
 app.use((req, res) => {
@@ -294,11 +183,4 @@ app.use((req, res) => {
 app.listen(PORT, () => {
   console.log('Options Data API running on http://localhost:' + PORT);
   console.log('Available dates: ' + sessionList.length);
-
-  warmCache((done, total, ok) => {
-    cacheProgress = { cached: done, total, ok };
-    const pct = ((done / total) * 100).toFixed(0);
-    process.stdout.write(`\rCache warm: ${done}/${total} (${pct}%) — ${ok} ok`);
-    if (done >= total) process.stdout.write('\n');
-  });
 });

@@ -12,9 +12,11 @@
   "license": "ISC",
   "description": "ZeroD SPX 0DTE Trading Dashboard",
   "dependencies": {
+    "@mongodb-js/zstd": "^7.0.0",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "hyparquet": "^1.26.0",
-    "parquetjs": "^0.11.2"
+    "parquetjs": "^0.11.2",
+    "simple-zstd": "^2.1.0"
   }
 }

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import type { SessionData, OptionRow } from '../types'
 import { fetchSession } from '../api'
-import { XAxis, YAxis, Tooltip, ResponsiveContainer, Area, AreaChart, Line } from 'recharts'
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 
 interface Props {
   selectedDate: string
@@ -196,7 +196,7 @@ export default function TradeLab({ selectedDate }: Props) {
           <AreaChart data={sessionData.pricePath.slice(0, tick + 1)}>
             <defs>
               <linearGradient id="replayGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#06b6d4" stopOpacity={0.3} />
+                <stop offset="0%" stopColor="#06b6d4" stopOpacity={0.15} />
                 <stop offset="100%" stopColor="#06b6d4" stopOpacity={0} />
               </linearGradient>
             </defs>
@@ -205,8 +205,7 @@ export default function TradeLab({ selectedDate }: Props) {
             <Tooltip
               contentStyle={{ background: '#1a1a2e', border: '1px solid #2a2a4a', borderRadius: 8, fontSize: 12 }}
             />
-            <Area type="monotone" dataKey="price" stroke="#06b6d4" fill="url(#replayGrad)" strokeWidth={2} />
-            <Line type="monotone" dataKey="price" stroke="#06b6d4" strokeWidth={2} dot={false} />
+            <Area type="monotone" dataKey="price" stroke="#06b6d4" fill="url(#replayGrad)" strokeWidth={2} dot={false} />
           </AreaChart>
         </ResponsiveContainer>
       </div>
@@ -216,8 +215,8 @@ export default function TradeLab({ selectedDate }: Props) {
         <h3 className="text-sm font-medium text-ztextdim mb-3">Chain at ${currentPrice.toFixed(0)} (BSM bid/ask)</h3>
         <p className="text-xs text-ztextdim mb-3">Click <span className="text-zgreen">Buy</span> to enter a long at ask price. Close later at the bid price.</p>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <MiniChainTable title="CALLS" rows={repricedChain.filter(r => r.type === 'call').slice(0, 15)} color="text-zgreen" showActions onBuy={handleBuy} />
-          <MiniChainTable title="PUTS" rows={repricedChain.filter(r => r.type === 'put').slice(0, 15)} color="text-zred" showActions onBuy={handleBuy} />
+          <MiniChainTable title="CALLS" rows={repricedChain.filter(r => r.type === 'call' && Math.abs(r.strike - currentPrice) <= 40).slice(0, 15)} color="text-zgreen" showActions onBuy={handleBuy} />
+          <MiniChainTable title="PUTS" rows={repricedChain.filter(r => r.type === 'put' && Math.abs(r.strike - currentPrice) <= 40).slice(0, 15)} color="text-zred" showActions onBuy={handleBuy} />
         </div>
       </div>
 

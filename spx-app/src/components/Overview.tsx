@@ -82,7 +82,7 @@ export default function Overview({ data, loading }: Props) {
     )
   }
 
-  const { spotPrice, pricePath, dailyLow, dailyHigh, dailyClose, dailyChange } = data || { spotPrice: liveSpot, pricePath: [], dailyLow: liveSpot, dailyHigh: liveSpot, dailyClose: liveSpot, dailyChange: 0 }
+  const { spotPrice, pricePath, dailyLow, dailyHigh, dailyChange } = data || { spotPrice: liveSpot, pricePath: [], dailyLow: liveSpot, dailyHigh: liveSpot, dailyChange: 0 }
   const openingChain = displayChain
 
   const chainPath = pricePath.map(p => {

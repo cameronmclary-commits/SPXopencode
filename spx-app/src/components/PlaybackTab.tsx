@@ -1,8 +1,7 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import type { SessionInfo, ChainSnapshot, OptionRow } from '../types'
 import { usePlayback, type PlaybackSpeed } from '../hooks/usePlayback'
-import { findBestCombo, type ComboLeg } from '../utils/combos'
-import { surfacePrice, numericDelta } from '../utils/pricing'
+import { findBestCombo } from '../utils/combos'
 
 interface Props {
   sessions: SessionInfo[]
@@ -18,9 +17,40 @@ interface ScanParams {
 interface SuggestedCombo {
   id: string
   type: 'call' | 'put'
-  legs: ComboLeg[]
+  legs: { strike: number; type: 'call' | 'put'; quantity: number; mid: number; conid?: number }[]
   totalCost: number
   templatePts: number
+}
+
+interface PlaybackTrade {
+  id: string
+  combo: SuggestedCombo
+  entrySnapshotIndex: number
+  entryTime: string
+  entryCost: number
+  exitSnapshotIndex?: number
+  exitTime?: string
+  exitValue?: number
+  pnl?: number
+  status: 'open' | 'closed'
+}
+
+function findOption(chain: OptionRow[], strike: number, type: string): OptionRow | undefined {
+  return chain.find(r => r.strike === strike && r.type === type)
+}
+
+function comboAskCost(combo: SuggestedCombo, snapshot: ChainSnapshot): number {
+  return combo.legs.reduce((sum, leg) => {
+    const opt = findOption(snapshot.chain, leg.strike, leg.type)
+    return sum + leg.quantity * (opt?.ask ?? 0)
+  }, 0)
+}
+
+function comboBidValue(combo: SuggestedCombo, snapshot: ChainSnapshot): number {
+  return combo.legs.reduce((sum, leg) => {
+    const opt = findOption(snapshot.chain, leg.strike, leg.type)
+    return sum + leg.quantity * (opt?.bid ?? 0)
+  }, 0)
 }
 
 export default function PlaybackTab({ sessions }: Props) {
@@ -34,6 +64,7 @@ export default function PlaybackTab({ sessions }: Props) {
     minDelta: 0.15,
   })
   const [suggestions, setSuggestions] = useState<SuggestedCombo[]>([])
+  const [trades, setTrades] = useState<PlaybackTrade[]>([])
   const timelineRef = useRef<HTMLDivElement>(null)
 
   const pb = usePlayback(snapshots)
@@ -46,6 +77,7 @@ export default function PlaybackTab({ sessions }: Props) {
       .then(data => {
         setSnapshots(data.snapshots || [])
         setSuggestions([])
+        setTrades([])
       })
       .catch(() => setSnapshots([]))
       .finally(() => setLoading(false))
@@ -54,46 +86,70 @@ export default function PlaybackTab({ sessions }: Props) {
   useEffect(() => {
     if (!pb.current) { setSuggestions([]); return }
     const { spot, chain } = pb.current
-    const baseSpot = snapshots[0]?.spot || spot
-    const priceShift = spot - baseSpot
-
-    const calls = chain.filter(r => r.type === 'call')
-    const puts = chain.filter(r => r.type === 'put')
-    const combos: SuggestedCombo[] = []
-
-    for (const c of calls) {
-      if (params.minDelta > 0 && c.delta != null && Math.abs(c.delta) < params.minDelta) continue
-      for (const p of puts) {
-        if (params.minDelta > 0 && p.delta != null && Math.abs(p.delta) < params.minDelta) continue
-        for (let pQty = 1; pQty <= 3; pQty++) {
-          const cost = surfacePrice(chain, c.strike, 'call', priceShift, spot) +
-            surfacePrice(chain, p.strike, 'put', priceShift, spot) * pQty
-          if (cost <= 0 || cost > params.maxCost) continue
-
-          const ptsUp = (surfacePrice(chain, c.strike, 'call', priceShift + params.templateMove, spot) -
-            surfacePrice(chain, p.strike, 'put', priceShift + params.templateMove, spot) * pQty) - cost
-          const ptsDown = (surfacePrice(chain, c.strike, 'call', priceShift - params.templateMove, spot) -
-            surfacePrice(chain, p.strike, 'put', priceShift - params.templateMove, spot) * pQty) - cost
-
-          if (ptsUp >= params.minPnl && ptsDown >= params.minPnl) {
-            combos.push({
-              id: `c${c.strike}_p${p.strike}_x${pQty}`,
-              type: 'call',
-              legs: [
-                { strike: c.strike, type: 'call', quantity: 1, bid: c.bid, ask: c.ask, mid: c.mid, conid: c.conid },
-                { strike: p.strike, type: 'put', quantity: pQty, bid: p.bid, ask: p.ask, mid: p.mid, conid: p.conid },
-              ],
-              totalCost: Math.round(cost * 100) / 100,
-              templatePts: params.templateMove,
-            })
-          }
-        }
+    const results = findBestCombo(chain, spot, params.maxCost, params.templateMove, params.minPnl, params.minDelta, 3)
+    setSuggestions(results.map((r, i) => {
+      const itmType = r.legs[0].type
+      return {
+        id: `sug_${i}_${Date.now()}`,
+        type: itmType,
+        legs: r.legs.map(l => ({
+          strike: l.strike, type: l.type, quantity: l.quantity,
+          mid: Math.round((l.entryAsk + l.entryBid) / 2 * 10000) / 10000,
+          conid: l.conid,
+        })),
+        totalCost: Math.round(r.cost * 100) / 100,
+        templatePts: params.templateMove,
       }
-    }
-
-    combos.sort((a, b) => b.templatePts - a.templatePts || a.totalCost - b.totalCost)
-    setSuggestions(combos.slice(0, 3))
+    }))
   }, [pb.current, params, snapshots])
+
+  // Auto-close open trades when playback reaches end
+  useEffect(() => {
+    if (!pb.atEnd || !pb.current) return
+    const currentSnap = pb.current
+    setTrades(prev => prev.map(t => {
+      if (t.status !== 'open') return t
+      const exitValue = comboBidValue(t.combo, currentSnap)
+      return {
+        ...t,
+        exitSnapshotIndex: pb.index,
+        exitTime: currentSnap.time,
+        exitValue: exitValue,
+        pnl: exitValue - t.entryCost,
+        status: 'closed',
+      }
+    }))
+  }, [pb.atEnd])
+
+  const handleTakeTrade = useCallback((combo: SuggestedCombo) => {
+    if (!pb.current) return
+    const entryCost = comboAskCost(combo, pb.current)
+    const trade: PlaybackTrade = {
+      id: `trade_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      combo,
+      entrySnapshotIndex: pb.index,
+      entryTime: pb.current.time,
+      entryCost,
+      status: 'open',
+    }
+    setTrades(prev => [...prev, trade])
+  }, [pb.current, pb.index])
+
+  const handleCloseTrade = useCallback((tradeId: string) => {
+    if (!pb.current) return
+    setTrades(prev => prev.map(t => {
+      if (t.id !== tradeId || t.status !== 'open') return t
+      const exitValue = comboBidValue(t.combo, pb.current!)
+      return {
+        ...t,
+        exitSnapshotIndex: pb.index,
+        exitTime: pb.current!.time,
+        exitValue,
+        pnl: exitValue - t.entryCost,
+        status: 'closed',
+      }
+    }))
+  }, [pb.current, pb.index])
 
   function updateParam<K extends keyof ScanParams>(key: K, val: ScanParams[K]) {
     setParams(p => ({ ...p, [key]: val }))
@@ -103,6 +159,15 @@ export default function PlaybackTab({ sessions }: Props) {
   const baseSpot = snapshots[0]?.spot || 0
   const spotChange = snapshot ? snapshot.spot - baseSpot : 0
   const spotChangePct = baseSpot > 0 ? (spotChange / baseSpot * 100) : 0
+  
+  const openTrades = trades.filter(t => t.status === 'open')
+  const closedTrades = trades.filter(t => t.status === 'closed')
+  const totalPnl = closedTrades.reduce((sum, t) => sum + (t.pnl ?? 0), 0) +
+    openTrades.reduce((sum, t) => {
+      if (!pb.current) return sum
+      const currentValue = comboBidValue(t.combo, pb.current)
+      return sum + (currentValue - t.entryCost)
+    }, 0)
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -296,11 +361,68 @@ export default function PlaybackTab({ sessions }: Props) {
                               </div>
                             ))}
                           </div>
-                          <div className="text-[10px] text-ztextdim mt-1">
-                            Template: <span className="text-zcyan">+{s.templatePts} pts</span>
+                          <div className="flex items-center justify-between mt-2">
+                            <div className="text-[10px] text-ztextdim">
+                              Template: <span className="text-zcyan">+{s.templatePts} pts</span>
+                            </div>
+                            <button onClick={() => handleTakeTrade(s)}
+                              className="text-[10px] px-2 py-0.5 rounded border border-zgreen/40 text-zgreen hover:bg-zgreen/10">
+                              Take Trade
+                            </button>
                           </div>
                         </div>
                       ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Trades Panel */}
+                <div className="panel-bg border border-zborder rounded-lg p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-xs font-medium text-ztextdim tracking-wide">Trades</h4>
+                    <span className={`text-xs font-mono font-semibold ${totalPnl >= 0 ? 'text-zgreen' : 'text-zred'}`}>
+                      P&L: ${totalPnl.toFixed(2)}
+                    </span>
+                  </div>
+                  {trades.length === 0 ? (
+                    <div className="text-xs text-ztextdim py-2">No trades taken. Click "Take Trade" on a combo above.</div>
+                  ) : (
+                    <div className="space-y-2 max-h-48 overflow-y-auto">
+                      {trades.map(t => {
+                        const currentValue = t.status === 'open' && pb.current
+                          ? comboBidValue(t.combo, pb.current)
+                          : t.exitValue ?? 0
+                        const pnl = t.status === 'open' && pb.current
+                          ? currentValue - t.entryCost
+                          : t.pnl ?? 0
+                        return (
+                          <div key={t.id} className={`border rounded p-2 ${t.status === 'open' ? 'border-zcyan/30' : 'border-zborder/50'}`}>
+                            <div className="flex items-center justify-between">
+                              <span className={`text-[10px] font-medium ${t.combo.type === 'call' ? 'text-zgreen' : 'text-zred'}`}>
+                                {t.combo.type.toUpperCase()} Combo
+                              </span>
+                              <span className={`text-[10px] font-mono ${pnl >= 0 ? 'text-zgreen' : 'text-zred'}`}>
+                                {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                              </span>
+                            </div>
+                            <div className="text-[9px] text-ztextdim font-mono mt-0.5">
+                              {t.combo.legs.map(l => `${l.type === 'call' ? 'C' : 'P'} ${l.strike}×${l.quantity}`).join(' ')}
+                            </div>
+                            <div className="flex items-center justify-between mt-1">
+                              <span className="text-[9px] text-ztextdim/60">
+                                Entry: {t.entryTime} @ ${t.entryCost.toFixed(2)}
+                                {t.status === 'closed' && t.exitTime ? ` → Exit: ${t.exitTime}` : ''}
+                              </span>
+                              {t.status === 'open' && (
+                                <button onClick={() => handleCloseTrade(t.id)}
+                                  className="text-[9px] px-1.5 py-0.5 rounded border border-zred/40 text-zred hover:bg-zred/10">
+                                  Close
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
                     </div>
                   )}
                 </div>

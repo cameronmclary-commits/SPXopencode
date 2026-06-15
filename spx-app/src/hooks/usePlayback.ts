@@ -84,13 +84,6 @@ export function usePlayback(snapshots: ChainSnapshot[]): PlaybackState & Playbac
     setIndex(total - 1)
   }, [pause, total])
 
-  const cycleSpeed = useCallback(() => {
-    setSpeed(prev => {
-      const currentIdx = SPEEDS.indexOf(prev)
-      return SPEEDS[(currentIdx + 1) % SPEEDS.length]
-    })
-  }, [])
-
   useEffect(() => {
     if (!playing) {
       if (timerRef.current) {
