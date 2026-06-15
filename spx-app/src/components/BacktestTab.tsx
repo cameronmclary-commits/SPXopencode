@@ -1,8 +1,8 @@
 import { useState, useRef, useMemo, useCallback } from 'react'
-import type { SessionData, OptionRow } from '../types'
+import type { SessionData, OptionRow, ChainSnapshot } from '../types'
 import { fetchSession } from '../api'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, ReferenceLine } from 'recharts'
-import { surfacePrice, getConsecutiveGroups } from '../utils/pricing'
+import { getConsecutiveGroups } from '../utils/pricing'
 import { type ComboLeg, evalCombo } from '../utils/combos'
 import { ParamInput, TimeInput, MetricCard } from './shared/UI'
 
@@ -36,6 +36,10 @@ function timeInRange(t: string, start: string, end: string): boolean {
 function timeToMinutes(t: string): number {
   const [h, m] = t.split(':').map(Number)
   return h * 60 + m
+}
+
+function optBid(chain: OptionRow[], strike: number, type: string): number {
+  return chain.find(r => r.strike === strike && r.type === type)?.bid ?? 0
 }
 
 function findBestCombo(chain: OptionRow[], spot: number, maxCost: number, templateMove: number, minPnl: number, minDelta: number): { legs: ComboLeg[]; cost: number; score: number } | null {
@@ -76,8 +80,14 @@ async function runBacktest(dates: string[], params: Params, onProgress: (u: { pc
     let session: SessionData
     try { session = await fetchSession(dates[di]) } catch { continue }
 
+    let snapshots: ChainSnapshot[] = []
+    try {
+      const res = await fetch(`/api/sessions/${dates[di]}/snapshots`)
+      const data = await res.json()
+      snapshots = data.snapshots || []
+    } catch { snapshots = [] }
+
     const totalTicks = session.pricePath.length
-    const baseSpot = session.pricePath[0].price
     let openTrade: { trade: BacktestTrade; legs: ComboLeg[]; entryTick: number } | null = null
     let tradeTakenThisDay = false
 
@@ -86,9 +96,10 @@ async function runBacktest(dates: string[], params: Params, onProgress: (u: { pc
       const spot = session.pricePath[tick].price
       const tickTime = session.pricePath[tick].time
       const tickMin = timeToMinutes(tickTime)
+      const chain = snapshots[tick]?.chain || session.openingChain
 
       if (!openTrade && !tradeTakenThisDay && tickMin >= nextScanMin && timeInRange(tickTime, params.sessionStart, params.sessionEnd)) {
-        const pos = findBestCombo(session.openingChain, spot, params.maxCost, params.templateMove, params.minPnl, params.minDelta)
+        const pos = findBestCombo(chain, spot, params.maxCost, params.templateMove, params.minPnl, params.minDelta)
         if (pos) {
           const trade: BacktestTrade = {
             id: `${dates[di]}_${tick}`,
@@ -106,8 +117,7 @@ async function runBacktest(dates: string[], params: Params, onProgress: (u: { pc
       if (openTrade) {
         if (tick === openTrade.entryTick) continue
         const { trade, legs } = openTrade
-        const priceShift = spot - baseSpot
-        const currentVal = legs.reduce((s, l) => s + l.quantity * surfacePrice(session.openingChain, l.strike, l.type, priceShift, false, baseSpot), 0)
+        const currentVal = legs.reduce((s, l) => s + l.quantity * optBid(chain, l.strike, l.type), 0)
         const pnl = currentVal - trade.entryCost
 
         if (pnl >= params.tpPoints) {
@@ -129,7 +139,7 @@ async function runBacktest(dates: string[], params: Params, onProgress: (u: { pc
         }
       }
 
-      if (tick % 50 === 0 && tick > 0) {
+      if (tick % 10 === 0 && tick > 0) {
         onProgress({ pct: ((di + (tick / totalTicks)) / dates.length) * 100, msg: `Processing ${dates[di]} (tick ${tick}/${totalTicks})`, cumPnl, trades, equityCurve })
       }
     }
@@ -137,8 +147,8 @@ async function runBacktest(dates: string[], params: Params, onProgress: (u: { pc
     if (openTrade) {
       const { trade, legs } = openTrade
       const finalTick = totalTicks - 1
-      const finalSpot = session.pricePath[finalTick].price
-      const finalVal = legs.reduce((s, l) => s + l.quantity * surfacePrice(session.openingChain, l.strike, l.type, finalSpot - baseSpot, false, baseSpot), 0)
+      const finalChain = snapshots[finalTick]?.chain || session.openingChain
+      const finalVal = legs.reduce((s, l) => s + l.quantity * optBid(finalChain, l.strike, l.type), 0)
       trade.exitTick = finalTick; trade.exitTime = session.pricePath[finalTick].time
       trade.exitValue = finalVal; trade.pnl = finalVal - trade.entryCost
       trade.pnlPct = trade.entryCost > 0 ? (trade.pnl / trade.entryCost) * 100 : 0

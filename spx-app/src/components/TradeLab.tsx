@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import type { SessionData, OptionRow } from '../types'
+import type { SessionData, ChainSnapshot, OptionRow } from '../types'
 import { fetchSession } from '../api'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 
@@ -14,46 +14,13 @@ interface PaperTrade {
   exitPrice?: number; exitTick?: number; exitTime?: string; pnl?: number
 }
 
-const R = 0.05
-
-function cdf(x: number): number {
-  const a = [0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429], p = 0.3275911
-  const s = x < 0 ? -1 : 1; const ax = Math.abs(x)
-  const t = 1 / (1 + p * ax)
-  let y = 1
-  for (let i = 4; i >= 0; i--) y = 1 - (a[i] * t + (i > 0 ? y : 0)) * t * Math.exp(-ax * ax)
-  return 0.5 * (1 + s * y)
-}
-
-function d1(S: number, K: number, t: number, r: number, sigma: number): number {
-  return (Math.log(S / K) + (r + sigma * sigma / 2) * t) / (sigma * Math.sqrt(t))
-}
-
-function bsPrice(S: number, K: number, t: number, r: number, sigma: number, isCall: boolean): number {
-  if (t <= 0) return Math.max(0, isCall ? S - K : K - S)
-  if (sigma <= 0) return Math.max(0, isCall ? S - K : K - S)
-  const d = d1(S, K, t, r, sigma)
-  const d2 = d - sigma * Math.sqrt(t)
-  return isCall ? S * cdf(d) - K * Math.exp(-r * t) * cdf(d2) : K * Math.exp(-r * t) * cdf(-d2) - S * cdf(-d)
-}
-
-function priceChain(spot: number, chain: OptionRow[], timeElapsed: number, totalDuration: number, iv: number): OptionRow[] {
-  const t = Math.max(0.001, (1 - timeElapsed / totalDuration) / 365)
-  return chain.map(o => {
-    if (o.strike <= 0) return o
-    const sigma = iv * (1 + 0.2 * Math.abs(o.strike - spot) / spot)
-    const mp = bsPrice(spot, o.strike, t, R, sigma, o.type === 'call')
-    return { ...o, bid: mp * 0.9, ask: mp * 1.1, mid: mp, last: mp }
-  })
-}
-
 export default function TradeLab({ selectedDate }: Props) {
   const [sessionData, setSessionData] = useState<SessionData | null>(null)
+  const [snapshots, setSnapshots] = useState<ChainSnapshot[]>([])
   const [loading, setLoading] = useState(false)
   const [playing, setPlaying] = useState(false)
   const [tick, setTick] = useState(0)
   const [speed, setSpeed] = useState(1)
-  const [iv, setIv] = useState(0.15)
   const [paperTrades, setPaperTrades] = useState<PaperTrade[]>([])
   const [autoPilot, setAutoPilot] = useState(false)
   const [tpPts, setTpPts] = useState(1)
@@ -66,9 +33,18 @@ export default function TradeLab({ selectedDate }: Props) {
     setTick(0)
     setPlaying(false)
     setAutoPilot(false)
-    fetchSession(selectedDate)
-      .then(d => setSessionData(d))
-      .catch(() => setSessionData(null))
+    setPaperTrades([])
+    setSnapshots([])
+
+    Promise.all([
+      fetchSession(selectedDate),
+      fetch(`/api/sessions/${selectedDate}/snapshots`).then(r => r.json()).then(d => d.snapshots || []),
+    ])
+      .then(([session, snaps]) => {
+        setSessionData(session)
+        setSnapshots(snaps)
+      })
+      .catch(() => { setSessionData(null); setSnapshots([]) })
       .finally(() => setLoading(false))
   }, [selectedDate])
 
@@ -89,13 +65,14 @@ export default function TradeLab({ selectedDate }: Props) {
   }, [playing, sessionData, speed])
 
   const currentPrice = sessionData?.pricePath[tick]?.price || sessionData?.spotPrice || 0
-  const repricedChain = useMemo(() => {
-    if (!sessionData) return []
-    return priceChain(currentPrice, sessionData.openingChain, tick, sessionData.pricePath.length, iv)
-  }, [sessionData, currentPrice, tick, iv])
+  const currentSnapshot = useMemo(() => {
+    return snapshots[tick] || snapshots[0] || null
+  }, [snapshots, tick])
+
+  const chain = currentSnapshot?.chain || sessionData?.openingChain || []
 
   const handleBuy = useCallback((strike: number, type: 'call' | 'put') => {
-    const option = repricedChain.find(r => r.strike === strike && r.type === type)
+    const option = chain.find(r => r.strike === strike && r.type === type)
     if (!option) return
     setPaperTrades(prev => [...prev, {
       id: Date.now().toString(),
@@ -107,18 +84,18 @@ export default function TradeLab({ selectedDate }: Props) {
       quantity: 1,
       status: 'open',
     }])
-  }, [repricedChain, tick, sessionData])
+  }, [chain, tick, sessionData])
 
   const closeTrade = useCallback((id: string) => {
     setPaperTrades(prev => prev.map(t => {
       if (t.id !== id || t.status !== 'open') return t
-      const option = repricedChain.find(r => r.strike === t.strike && r.type === t.type)
+      const option = chain.find(r => r.strike === t.strike && r.type === t.type)
       if (!option) return t
       const exitPrice = option.bid
       const pnl = (exitPrice - t.entryPrice) * t.quantity
       return { ...t, status: 'closed' as const, exitPrice, exitTick: tick, exitTime: sessionData?.pricePath[tick]?.time || '', pnl }
     }))
-  }, [repricedChain, tick, sessionData])
+  }, [chain, tick, sessionData])
 
   useEffect(() => {
     if (!autoPilot || !sessionData) return
@@ -127,13 +104,13 @@ export default function TradeLab({ selectedDate }: Props) {
 
     const openTrades = paperTrades.filter(t => t.status === 'open')
     for (const t of openTrades) {
-      const option = repricedChain.find(r => r.strike === t.strike && r.type === t.type)
+      const option = chain.find(r => r.strike === t.strike && r.type === t.type)
       if (!option) continue
       const unrealized = (option.bid - t.entryPrice) * t.quantity
       if (unrealized >= tpPts) closeTrade(t.id)
       else if (unrealized <= -slPts) closeTrade(t.id)
     }
-  }, [autoPilot, tick, sessionData, paperTrades, repricedChain, tpPts, slPts, closeTrade])
+  }, [autoPilot, tick, sessionData, paperTrades, chain, tpPts, slPts, closeTrade])
 
   if (loading) return <div className="text-center py-12 text-ztextdim animate-pulse">Loading session...</div>
   if (!sessionData) return <div className="text-center py-12 text-ztextdim">Select a session date.</div>
@@ -169,11 +146,6 @@ export default function TradeLab({ selectedDate }: Props) {
               <option value={5}>5x</option>
               <option value={10}>10x</option>
             </select>
-          </div>
-          <div className="flex items-center gap-2">
-            <label className="text-xs text-ztextdim">IV:</label>
-            <input type="range" min={5} max={80} value={iv * 100} onChange={e => setIv(Number(e.target.value) / 100)} className="w-20" />
-            <span className="text-xs font-mono text-ztext">{(iv * 100).toFixed(0)}%</span>
           </div>
         </div>
         <div className="mt-3">
@@ -212,13 +184,13 @@ export default function TradeLab({ selectedDate }: Props) {
         </ResponsiveContainer>
       </div>
 
-      {/* Repriced Chain */}
+      {/* Real Chain */}
       <div className="bg-zgray/30 border border-zborder rounded-lg p-4">
-        <h3 className="text-sm font-medium text-ztextdim mb-3">Chain at ${currentPrice.toFixed(0)} (BSM bid/ask)</h3>
+        <h3 className="text-sm font-medium text-ztextdim mb-3">Chain at ${currentPrice.toFixed(0)} ({currentSnapshot?.time || '—'})</h3>
         <p className="text-xs text-ztextdim mb-3">Click <span className="text-zgreen">Buy</span> to enter a long at ask price. Close later at the bid price.</p>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <MiniChainTable title="CALLS" rows={repricedChain.filter(r => r.type === 'call' && Math.abs(r.strike - currentPrice) <= 40).slice(0, 15)} color="text-zgreen" showActions onBuy={handleBuy} />
-          <MiniChainTable title="PUTS" rows={repricedChain.filter(r => r.type === 'put' && Math.abs(r.strike - currentPrice) <= 40).slice(0, 15)} color="text-zred" showActions onBuy={handleBuy} />
+          <MiniChainTable title="CALLS" rows={chain.filter(r => r.type === 'call' && Math.abs(r.strike - currentPrice) <= 40).slice(0, 15)} color="text-zgreen" showActions onBuy={handleBuy} />
+          <MiniChainTable title="PUTS" rows={chain.filter(r => r.type === 'put' && Math.abs(r.strike - currentPrice) <= 40).slice(0, 15)} color="text-zred" showActions onBuy={handleBuy} />
         </div>
       </div>
 
@@ -253,7 +225,7 @@ export default function TradeLab({ selectedDate }: Props) {
               </thead>
               <tbody>
                 {paperTrades.map(t => {
-                  const option = repricedChain.find(r => r.strike === t.strike && r.type === t.type)
+                  const option = chain.find(r => r.strike === t.strike && r.type === t.type)
                   const curVal = option?.bid || 0
                   const unrealizedPnl = (curVal - t.entryPrice) * t.quantity
                   return (
