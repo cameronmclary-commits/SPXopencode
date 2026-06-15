@@ -200,8 +200,6 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
     sessionStart: '09:30', sessionEnd: '16:00',
   })
   const [mode, setMode] = useState<'range' | 'pick'>('range')
-  const [yearStart, setYearStart] = useState(2024)
-  const [yearEnd, setYearEnd] = useState(2025)
   const [selectedDates, setSelectedDates] = useState<Set<string>>(new Set())
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState(0)
@@ -214,12 +212,7 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
     setParams(p => ({ ...p, [k]: v }))
   }, [])
 
-  const rangeDates = useMemo(() => {
-    return sessions.filter(s => {
-      const y = parseInt(s.date.slice(0, 4))
-      return y >= yearStart && y <= yearEnd
-    }).map(s => s.date)
-  }, [sessions, yearStart, yearEnd])
+  const allDates = useMemo(() => sessions.map(s => s.date), [sessions])
 
   const toggleDate = (d: string) => {
     setSelectedDates(prev => {
@@ -233,7 +226,7 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
     setRunning(true); setProgress(0); setProgressMsg('Starting...')
     setLiveEquity([]); setLiveTrades([])
     canceledRef.current = false
-    const dates = mode === 'range' ? rangeDates.slice(0, 50) : [...selectedDates].sort()
+    const dates = mode === 'range' ? allDates.slice(0, 50) : [...selectedDates].sort()
     if (dates.length === 0) { setRunning(false); return }
 
     const res = await runBacktest(dates, params, (u) => {
@@ -269,12 +262,8 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
             <TimeInput label="Session Start" value={params.sessionStart} onChange={v => updateParam('sessionStart', v)} />
             <TimeInput label="Session End" value={params.sessionEnd} onChange={v => updateParam('sessionEnd', v)} />
             <div className="flex items-center gap-2">
-              <label className="text-xs text-ztextdim">Year:</label>
-              <select value={yearStart} onChange={e => { setYearStart(Number(e.target.value)); setYearEnd(Number(e.target.value) + 1) }} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext">
-                <option value={2024}>2024</option>
-                <option value={2025}>2025</option>
-                <option value={2026}>2026</option>
-              </select>
+              <label className="text-xs text-ztextdim">Dates:</label>
+              <span className="text-xs font-mono text-ztext">{allDates.length} available (all 0DTE)</span>
             </div>
           </div>
         ) : (

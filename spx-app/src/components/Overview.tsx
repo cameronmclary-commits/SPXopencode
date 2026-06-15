@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import type { SessionData, OptionRow } from '../types'
+import type { SessionData, OptionRow, ChainSnapshot } from '../types'
 import { XAxis, YAxis, Tooltip, ResponsiveContainer, Area, AreaChart, BarChart, Bar } from 'recharts'
 
 interface Props {
@@ -28,10 +28,23 @@ function totalOI(chain: OptionRow[]): { calls: number; puts: number } {
   }
 }
 
+function findATMInSnapshot(snapshot: ChainSnapshot): { callMid: number; putMid: number; straddle: number } {
+  const calls = snapshot.chain.filter(r => r.type === 'call')
+  const puts = snapshot.chain.filter(r => r.type === 'put')
+  const spot = snapshot.spot
+  if (!calls.length || !puts.length) return { callMid: 0, putMid: 0, straddle: 0 }
+  const atmCall = calls.reduce((best, r) => Math.abs(r.strike - spot) < Math.abs(best.strike - spot) ? r : best)
+  const atmPut = puts.reduce((best, r) => Math.abs(r.strike - spot) < Math.abs(best.strike - spot) ? r : best)
+  const callMid = atmCall?.mid ?? 0
+  const putMid = atmPut?.mid ?? 0
+  return { callMid, putMid, straddle: callMid + putMid }
+}
+
 export default function Overview({ data, loading }: Props) {
   const [liveSpot, setLiveSpot] = useState(0)
   const [liveChain, setLiveChain] = useState<OptionRow[]>([])
   const [ibkrStatus, setIbkrStatus] = useState<'offline' | 'connected' | 'authenticated'>('offline')
+  const [snapshots, setSnapshots] = useState<ChainSnapshot[]>([])
   const liveApiBase = window.location.origin
   const polledRef = useRef(false)
 
@@ -61,6 +74,14 @@ export default function Overview({ data, loading }: Props) {
     return () => clearInterval(iv)
   }, [])
 
+  useEffect(() => {
+    if (!data?.date) { setSnapshots([]); return }
+    fetch(`/api/sessions/${data.date}/snapshots`)
+      .then(r => r.json())
+      .then(d => setSnapshots(d.snapshots || []))
+      .catch(() => setSnapshots([]))
+  }, [data?.date])
+
   if (loading) {
     return (
       <div className="panel-bg border border-zborder rounded-lg p-12 text-center animate-fade-in">
@@ -85,12 +106,13 @@ export default function Overview({ data, loading }: Props) {
   const { spotPrice, pricePath, dailyLow, dailyHigh, dailyChange } = data || { spotPrice: liveSpot, pricePath: [], dailyLow: liveSpot, dailyHigh: liveSpot, dailyChange: 0 }
   const openingChain = displayChain
 
-  const chainPath = pricePath.map(p => {
-    const shift = p.price - spotPrice
-    const sortedCalls = openingChain.filter(r => r.type === 'call').sort((a, b) => Math.abs(a.strike - (spotPrice + shift)) - Math.abs(b.strike - (spotPrice + shift)))
-    const sortedPuts = openingChain.filter(r => r.type === 'put').sort((a, b) => Math.abs(a.strike - (spotPrice + shift)) - Math.abs(b.strike - (spotPrice + shift)))
-    const ac = sortedCalls[0], ap = sortedPuts[0]
-    return { ...p, callMid: ac?.mid || 0, putMid: ap?.mid || 0, straddle: (ac?.mid || 0) + (ap?.mid || 0) }
+  const chainPath = pricePath.map((p, i) => {
+    const snap = snapshots[i]
+    if (snap) {
+      const { callMid, putMid, straddle } = findATMInSnapshot(snap)
+      return { ...p, callMid, putMid, straddle }
+    }
+    return { ...p, callMid: 0, putMid: 0, straddle: 0 }
   })
 
   const { atmCall, atmPut } = findATM(openingChain, displaySpot)
@@ -133,8 +155,8 @@ export default function Overview({ data, loading }: Props) {
       {chainPath.length > 0 && (
         <div className="panel-bg border border-zborder rounded-lg p-4">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-medium text-ztextdim tracking-wide">Estimated Intraday Path</h3>
-            <span className="text-[10px] text-ztextdim tracking-wide uppercase">synthetic — shows open, high, low, close</span>
+            <h3 className="text-sm font-medium text-ztextdim tracking-wide">Intraday Price & ATM Straddle Decay</h3>
+            <span className="text-[10px] text-ztextdim tracking-wide uppercase">real chain — 0DTE straddle approaches zero at expiration</span>
           </div>
           <ResponsiveContainer width="100%" height={260}>
             <AreaChart data={chainPath}>

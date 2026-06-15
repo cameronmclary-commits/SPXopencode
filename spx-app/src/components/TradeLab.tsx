@@ -28,15 +28,16 @@ export default function TradeLab({ selectedDate }: Props) {
     sessionStart: '09:30', sessionEnd: '16:00',
   })
   const [trades, setTrades] = useState<ForwardTrade[]>([])
-  const [openTrade, setOpenTrade] = useState<ForwardTrade | null>(null)
-  const [nextScan, setNextScan] = useState(-1)
   const [cumPnl, setCumPnl] = useState(0)
+  const openTradeRef = useRef<ForwardTrade | null>(null)
+  const nextScanRef = useRef(-1)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
     if (!selectedDate) return
     setLoading(true); setTick(0); setPlaying(false)
-    setTrades([]); setOpenTrade(null); setNextScan(-1); setCumPnl(0)
+    setTrades([]); setCumPnl(0)
+    openTradeRef.current = null; nextScanRef.current = -1
     Promise.all([
       fetchSession(selectedDate),
       fetch(`/api/sessions/${selectedDate}/snapshots`).then(r => r.json()).then(d => d.snapshots || []),
@@ -66,9 +67,10 @@ export default function TradeLab({ selectedDate }: Props) {
 
   // Scan & trade logic on each tick
   useEffect(() => {
-    if (!sessionData || openTrade) return
+    if (!sessionData) return
+    if (openTradeRef.current) return
     const tickMin = timeToMinutes(currentTime)
-    if (tickMin < nextScan || !timeInRange(currentTime, params.sessionStart, params.sessionEnd)) return
+    if (tickMin < nextScanRef.current || !timeInRange(currentTime, params.sessionStart, params.sessionEnd)) return
     const results = findBestCombo(currentChain, currentPrice, params.maxCost, params.templateMove, params.minPnl, params.minDelta)
     if (!results.length) return
     const pos = results[0]
@@ -78,45 +80,47 @@ export default function TradeLab({ selectedDate }: Props) {
       entryTick: tick, entryTime: currentTime,
       status: 'open',
     }
-    setOpenTrade(trade)
-    setNextScan(tickMin + params.scanInterval)
-  }, [tick, sessionData, openTrade, currentChain, currentPrice, currentTime, params, nextScan])
+    openTradeRef.current = trade
+    nextScanRef.current = tickMin + params.scanInterval
+  }, [tick, sessionData, currentChain, currentPrice, currentTime, params])
 
   // Monitor open trade for TP/SL
   useEffect(() => {
-    if (!openTrade || !sessionData) return
-    if (tick === openTrade.entryTick) return
-    const currentVal = openTrade.legs.reduce((s, l) => {
+    const ot = openTradeRef.current
+    if (!ot || !sessionData) return
+    if (tick === ot.entryTick) return
+    const currentVal = ot.legs.reduce((s, l) => {
       const opt = currentChain.find(r => r.strike === l.strike && r.type === l.type)
       return s + l.quantity * (opt?.bid ?? 0)
     }, 0)
-    const pnl = currentVal - openTrade.entryCost
+    const pnl = currentVal - ot.entryCost
 
     let reason = ''
     if (pnl >= params.tpPoints) reason = 'TP'
     else if (pnl <= -params.slPoints) reason = 'SL'
 
     if (reason) {
-      const closed = { ...openTrade, exitTick: tick, exitTime: currentTime, exitValue: currentVal, pnl, exitReason: reason, status: 'closed' as const }
+      const closed = { ...ot, exitTick: tick, exitTime: currentTime, exitValue: currentVal, pnl, exitReason: reason, status: 'closed' as const }
       setTrades(prev => [...prev, closed])
       setCumPnl(prev => prev + pnl)
-      setOpenTrade(null)
+      openTradeRef.current = null
     }
-  }, [tick, openTrade, sessionData, currentChain, currentTime, params])
+  }, [tick, sessionData, currentChain, currentTime, params])
 
   // Auto-close at end of session
   useEffect(() => {
-    if (!openTrade || !sessionData) return
+    const ot = openTradeRef.current
+    if (!ot || !sessionData) return
     if (tick < sessionData.pricePath.length - 1) return
-    const currentVal = openTrade.legs.reduce((s, l) => {
+    const currentVal = ot.legs.reduce((s, l) => {
       const opt = currentChain.find(r => r.strike === l.strike && r.type === l.type)
       return s + l.quantity * (opt?.bid ?? 0)
     }, 0)
-    const pnl = currentVal - openTrade.entryCost
-    const closed = { ...openTrade, exitTick: tick, exitTime: currentTime, exitValue: currentVal, pnl, exitReason: 'EOS', status: 'closed' as const }
+    const pnl = currentVal - ot.entryCost
+    const closed = { ...ot, exitTick: tick, exitTime: currentTime, exitValue: currentVal, pnl, exitReason: 'EOS', status: 'closed' as const }
     setTrades(prev => [...prev, closed])
     setCumPnl(prev => prev + pnl)
-    setOpenTrade(null)
+    openTradeRef.current = null
   }, [tick, sessionData])
 
   if (loading) return <div className="text-center py-12 text-ztextdim animate-pulse">Loading session...</div>
@@ -124,7 +128,7 @@ export default function TradeLab({ selectedDate }: Props) {
 
   const totalTicks = sessionData.pricePath.length
   const progress = tick / (totalTicks - 1)
-  const allTrades = [...trades, ...(openTrade ? [openTrade] : [])]
+  const allTrades = [...trades, ...(openTradeRef.current ? [openTradeRef.current] : [])]
 
   return (
     <div className="space-y-4">
@@ -134,7 +138,7 @@ export default function TradeLab({ selectedDate }: Props) {
             className={`px-4 py-1.5 text-sm font-medium rounded ${playing ? 'bg-zred/20 text-zred border border-zred' : 'bg-zcyan/20 text-zcyan border border-zcyan'}`}>
             {playing ? 'Pause' : 'Play'}
           </button>
-          <button onClick={() => { setTick(0); setPlaying(false); setOpenTrade(null); setNextScan(-1) }}
+          <button onClick={() => { setTick(0); setPlaying(false); openTradeRef.current = null; nextScanRef.current = -1 }}
             className="px-3 py-1.5 text-xs text-ztextdim border border-zborder rounded hover:text-ztext">Reset</button>
           <div className="flex items-center gap-2">
             <label className="text-xs text-ztextdim">Speed:</label>
@@ -150,7 +154,7 @@ export default function TradeLab({ selectedDate }: Props) {
           <span className={`text-xs font-mono font-semibold ${cumPnl >= 0 ? 'text-zgreen' : 'text-zred'}`}>
             P&L: {cumPnl >= 0 ? '+' : ''}{cumPnl.toFixed(2)} pts
           </span>
-          {openTrade && <span className="text-xs text-zyellow animate-pulse">● Active</span>}
+          {openTradeRef.current && <span className="text-xs text-zyellow animate-pulse">● Active</span>}
         </div>
         <div className="mt-3">
           <div className="flex justify-between text-xs text-ztextdim mb-1">
