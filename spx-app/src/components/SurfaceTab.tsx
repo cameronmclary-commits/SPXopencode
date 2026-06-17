@@ -78,6 +78,7 @@ export default function SurfaceTab({ sessions }: Props) {
     }
     const strikes = [...allStrikes].sort((a, b) => a - b)
     const times = snapshots.map(s => s.time)
+    const spots = snapshots.map(s => s.spot)
     const grid = strikes.map(strike => {
       return times.map((_, ti) => {
         const s = snapshots[ti]
@@ -89,7 +90,7 @@ export default function SurfaceTab({ sessions }: Props) {
         return vals.length > 0 ? vals.reduce((a, b) => a + b, 0) / vals.length : 0
       })
     })
-    return { strikes, times, grid }
+    return { strikes, times, spots, grid }
   }, [snapshots, showCalls, showPuts])
 
   const { gridMin, gridMax } = useMemo(() => {
@@ -196,6 +197,14 @@ export default function SurfaceTab({ sessions }: Props) {
                         </th>
                       ))}
                     </tr>
+                    <tr className="sticky top-[22px] bg-zdark/95 z-10">
+                      <th className="text-right px-1 py-0.5 text-[8px] text-ztextdim/40 sticky left-0 bg-zdark z-20">Spot</th>
+                      {surfaceData.spots.map((sp, i) => (
+                        <th key={i} className={`px-1 py-0.5 text-center text-[8px] ${i === snapIdx ? 'text-zcyan' : 'text-ztextdim/40'}`}>
+                          {sp.toFixed(0)}
+                        </th>
+                      ))}
+                    </tr>
                   </thead>
                   <tbody>
                     {surfaceData.strikes.map((strike, si) => {
@@ -206,13 +215,16 @@ export default function SurfaceTab({ sessions }: Props) {
                           <td className={`text-right px-1 py-0.5 sticky left-0 bg-zdark z-10 ${atm < 10 ? 'text-zcyan font-bold' : 'text-ztextdim'}`}>
                             {strike}
                           </td>
-                          {row.map((v, ti) => (
-                            <td key={ti}
-                              className={`px-1 py-0.5 text-center ${ti === snapIdx ? 'ring-1 ring-zcyan' : ''}`}
-                              style={{ backgroundColor: v > 0 ? getColor(v, gridMin, gridMax) : 'transparent', color: v > (gridMin + gridMax) / 2 ? '#fff' : '#9ca3af' }}>
-                              {v > 0 ? v.toFixed(1) : '—'}
-                            </td>
-                          ))}
+                          {row.map((v, ti) => {
+                            const isAtm = Math.abs(strike - surfaceData.spots[ti]) < 2.5
+                            return (
+                              <td key={ti}
+                                className={`px-1 py-0.5 text-center ${ti === snapIdx ? 'ring-1 ring-zcyan' : ''} ${isAtm ? 'ring-1 ring-white/40' : ''}`}
+                                style={{ backgroundColor: v > 0 ? getColor(v, gridMin, gridMax) : 'transparent', color: v > (gridMin + gridMax) / 2 ? '#fff' : '#9ca3af' }}>
+                                {v > 0 ? v.toFixed(1) : '—'}
+                              </td>
+                            )
+                          })}
                         </tr>
                       )
                     })}

@@ -61,25 +61,39 @@ function comboBidValue(combo: SuggestedCombo, snapshot: ChainSnapshot): number {
   }, 0)
 }
 
+function comboStillValid(combo: SuggestedCombo, snapshot: ChainSnapshot): boolean {
+  const cost = comboAskCost(combo, snapshot)
+  if (cost > 90) return false
+  const pnlAt = (move: number) =>
+    combo.legs.reduce((s, l) => s + l.quantity * surfacePrice(snapshot.chain, l.strike, l.type, move, false), 0) - cost
+  const p10Pos = pnlAt(10)
+  const p10Neg = pnlAt(-10)
+  return p10Pos >= 1 && p10Neg >= 1
+}
+
 export default function PlaybackTab({ sessions }: Props) {
   const [selectedDate, setSelectedDate] = useState(sessions[0]?.date || '')
   const [snapshots, setSnapshots] = useState<ChainSnapshot[]>([])
   const [loading, setLoading] = useState(false)
   const [params, setParams] = useState<ScanParams>({
-    maxCost: 70,
-    templateMove: 10,
+    maxCost: 90,
+    templateMove: 25,
     minPnl10: 1,
     minPnl: 0,
     minPnlHalf: 0,
-    minSideDelta: 0.5,
-    minBalance: 0.7,
+    minSideDelta: 0.4,
+    minBalance: 0.6,
     minGap: 5,
-    minSpotGap: 3,
+    minSpotGap: 2,
     maxStep: 10,
   })
   const [suggestions, setSuggestions] = useState<SuggestedCombo[]>([])
   const [trades, setTrades] = useState<PlaybackTrade[]>([])
   const [signalHistory, setSignalHistory] = useState<SignalPoint[]>([])
+  const [autoMode, setAutoMode] = useState<'off' | 'all' | 'one'>('off')
+  const [entryThreshold, setEntryThreshold] = useState(1.5)
+  const [exitThreshold, setExitThreshold] = useState(0.7)
+  const autoTakenRef = useRef(false)
   const timelineRef = useRef<HTMLDivElement>(null)
 
   const pb = usePlayback(snapshots)
@@ -93,6 +107,7 @@ export default function PlaybackTab({ sessions }: Props) {
         setSnapshots(data.snapshots || [])
         setSuggestions([])
         setTrades([])
+        autoTakenRef.current = false
       })
       .catch(() => setSnapshots([]))
       .finally(() => setLoading(false))
@@ -127,10 +142,57 @@ export default function PlaybackTab({ sessions }: Props) {
       return
     }
     const history = comboCostHistory(top.legs, snapshots)
-    const lookback = Math.max(5, Math.min(15, Math.floor(snapshots.length / 3)))
+    const lookback = Math.min(25, Math.max(5, Math.floor(snapshots.length / 3)))
     const zscores = rollingZscore(history.map(h => h.cost), lookback)
     setSignalHistory(history.map((h, i) => ({ ...h, zscore: zscores[i] })))
   }, [suggestions[0], snapshots])
+
+  // Auto-trade: enter on z-score < -entryThreshold, exit on z-score > -exitThreshold
+  useEffect(() => {
+    if (autoMode === 'off') return
+    const top = suggestions[0]
+    if (!top || !pb.current) return
+
+    const cur = signalHistory[pb.index]
+    const prev = signalHistory[pb.index - 1]
+    if (!cur || cur.zscore == null) return
+
+    // Exit: any open trade whose tracked combo z-score converged above -exitThreshold
+    if (cur.zscore >= -exitThreshold && prev?.zscore != null && prev.zscore < -exitThreshold) {
+      setTrades(prevT => prevT.map(t => {
+        if (t.status !== 'open') return t
+        const exitValue = comboBidValue(t.combo, pb.current!)
+        return {
+          ...t, exitSnapshotIndex: pb.index,
+          exitTime: pb.current!.time, exitValue,
+          pnl: exitValue - t.entryCost, status: 'closed',
+        }
+      }))
+    }
+
+    // Entry: z-score signal + combo still meets P&L criteria at current prices
+    if (cur.zscore <= -entryThreshold && (prev?.zscore == null || prev.zscore > -entryThreshold)) {
+      if (autoMode === 'one' && autoTakenRef.current) return
+      const alreadyIn = trades.some(t => t.status === 'open')
+      if (alreadyIn) return
+      if (!comboStillValid(top, pb.current)) return
+      const entryCost = comboAskCost(top, pb.current)
+      const trade: PlaybackTrade = {
+        id: `trade_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        combo: top,
+        entrySnapshotIndex: pb.index,
+        entryTime: pb.current.time,
+        entryCost,
+        status: 'open',
+      }
+      setTrades(prevT => [...prevT, trade])
+      if (autoMode === 'one') autoTakenRef.current = true
+    }
+  }, [pb.index, autoMode, signalHistory, suggestions[0]])
+
+  useEffect(() => {
+    if (autoMode === 'off') autoTakenRef.current = false
+  }, [autoMode])
 
   // Auto-close open trades when playback reaches end
   useEffect(() => {
@@ -405,6 +467,37 @@ export default function PlaybackTab({ sessions }: Props) {
                     </div>
                   </div>
 
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-[10px] text-ztextdim tracking-wide uppercase">Auto</span>
+                    {(['off', 'one', 'all'] as const).map(m => (
+                      <button key={m} onClick={() => { setAutoMode(m); autoTakenRef.current = false }}
+                        className={`px-2 py-0.5 text-[10px] rounded border ${
+                          autoMode === m ? 'border-zcyan text-zcyan bg-zcyan/10' : 'border-zborder text-ztextdim hover:text-ztext'
+                        }`}>
+                        {m === 'off' ? 'Off' : m === 'one' ? 'One' : 'All'}
+                      </button>
+                    ))}
+                    {autoMode === 'one' && autoTakenRef.current && (
+                      <button onClick={() => { setAutoMode('one'); autoTakenRef.current = false }}
+                        className="px-2 py-0.5 text-[10px] rounded border border-zyellow/40 text-zyellow hover:bg-zyellow/10">
+                        Reset
+                      </button>
+                    )}
+                    <div className="flex items-center gap-1 ml-2">
+                      <label className="text-[9px] text-ztextdim/60">Entry</label>
+                      <input type="number" value={entryThreshold} onChange={e => setEntryThreshold(Number(e.target.value))}
+                        className="bg-zgray border border-zborder rounded px-1 py-0.5 text-[10px] text-ztext w-10 text-center" step={0.5} min={0.5} max={3} />
+                      <label className="text-[9px] text-ztextdim/60">Exit</label>
+                      <input type="number" value={exitThreshold} onChange={e => setExitThreshold(Number(e.target.value))}
+                        className="bg-zgray border border-zborder rounded px-1 py-0.5 text-[10px] text-ztext w-10 text-center" step={0.1} min={0.1} max={2} />
+                    </div>
+                    {autoMode !== 'off' && (
+                      <span className="text-[10px] text-zcyan/60 ml-auto">
+                        {autoMode === 'one' ? (autoTakenRef.current ? 'Taken' : 'Waiting...') : 'Auto'}
+                      </span>
+                    )}
+                  </div>
+
                   {suggestions.length === 0 ? (
                     <div className="text-xs text-ztextdim py-2">No combos found at current snapshot</div>
                   ) : (
@@ -459,8 +552,8 @@ export default function PlaybackTab({ sessions }: Props) {
                         if (s.zscore == null) return <div key={i} className="flex-1 h-0.5 bg-ztextdim/10 rounded" />
                         const h = Math.min(Math.abs(s.zscore) / 3 * 100, 100)
                         const color = s.zscore > 0
-                          ? (s.zscore >= 2 ? 'bg-zgreen' : s.zscore >= 1 ? 'bg-zgreen/50' : 'bg-ztextdim/30')
-                          : (s.zscore <= -2 ? 'bg-zred' : s.zscore <= -1 ? 'bg-zred/50' : 'bg-ztextdim/30')
+                          ? (s.zscore >= entryThreshold ? 'bg-zgreen' : s.zscore >= exitThreshold ? 'bg-zgreen/50' : 'bg-ztextdim/30')
+                          : (s.zscore <= -entryThreshold ? 'bg-zred' : s.zscore <= -exitThreshold ? 'bg-zred/50' : 'bg-ztextdim/30')
                         const isActive = i === pb.index
                         return (
                           <div key={i} className="flex-1 flex flex-col-reverse items-center h-full relative">

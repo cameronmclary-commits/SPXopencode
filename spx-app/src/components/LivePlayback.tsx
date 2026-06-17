@@ -55,7 +55,7 @@ export default function LivePlayback() {
   const [lastComboLegs, setLastComboLegs] = useState<ComboLeg[] | null>(null)
   const chainRef = useRef<OptionRow[]>([])
 
-  const [maxCost, setMaxCost] = useState(70)
+  const [maxCost, setMaxCost] = useState(90)
   const [templateMove, setTemplateMove] = useState(10)
   const [minPnl10, setMinPnl10] = useState(1)
   const [minPnl, setMinPnl] = useState(0.5)

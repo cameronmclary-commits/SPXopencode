@@ -63,7 +63,7 @@ export default function LiveAnalysis() {
   const [minGap, setMinGap] = useState(15)
   const [minSpotGap, setMinSpotGap] = useState(10)
   const [maxStep, setMaxStep] = useState(10)
-  const [maxCost, setMaxCost] = useState(70)
+  const [maxCost, setMaxCost] = useState(90)
 
   const [comboResults, setComboResults] = useState<ComboDisplay[]>([])
   const [refreshing, setRefreshing] = useState(false)

@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import type { SessionInfo, ChainSnapshot } from '../types'
 import { findBestCombo } from '../utils/combos'
-import { comboCostHistory, rollingZscore, comboMidCost } from '../utils/signals'
+import { comboCostHistory, rollingZscore, comboAskCost, comboBidValue } from '../utils/signals'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, Legend } from 'recharts'
 
 interface Props {
@@ -30,8 +30,8 @@ export default function MarkoutTab({ sessions }: Props) {
   const [loading, setLoading] = useState(false)
   const [maxHold, setMaxHold] = useState(5)
   const [minCostFilter, setMinCostFilter] = useState(10)
-  const [maxCostFilter, setMaxCostFilter] = useState(70)
-  const [lookback, setLookback] = useState(10)
+  const [maxCostFilter, setMaxCostFilter] = useState(90)
+  const [lookback, setLookback] = useState(25)
 
   useEffect(() => {
     if (!selectedDate) return
@@ -46,9 +46,9 @@ export default function MarkoutTab({ sessions }: Props) {
   }, [selectedDate])
 
   const scanParams = useMemo(() => ({
-    maxCost: maxCostFilter, templateMove: 10, minPnl10: 1, minPnl: 0,
-    minPnlHalf: 0, minSideDelta: 0.5, minBalance: 0.7, minGap: 5,
-    minSpotGap: 3, maxStep: 10,
+    maxCost: maxCostFilter, templateMove: 25, minPnl10: 1, minPnl: 0,
+    minPnlHalf: 0, minSideDelta: 0.4, minBalance: 0.6, minGap: 5,
+    minSpotGap: 2, maxStep: 10,
   }), [maxCostFilter])
 
   const bestCombo = useMemo(() => {
@@ -98,11 +98,11 @@ export default function MarkoutTab({ sessions }: Props) {
       const allMarkouts: number[][] = entries.map(entryIdx => {
         const entryCost = costHistory[entryIdx].cost
         if (entryCost < minCostFilter) return []
-        const row: number[] = [0]
-        for (let j = 1; j <= maxStep && entryIdx + j < snapshots.length; j++) {
-          const cur = comboMidCost(bestCombo.legs, snapshots[entryIdx + j])
-          row.push(cur - entryCost)
-        }
+            const row: number[] = [0]
+            for (let j = 1; j <= maxStep && entryIdx + j < snapshots.length; j++) {
+              const cur = comboBidValue(bestCombo.legs, snapshots[entryIdx + j])
+              row.push(cur - entryCost)
+            }
         return row.filter((_, k) => k <= maxStep)
       }).filter(r => r.length > 1)
 

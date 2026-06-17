@@ -57,7 +57,7 @@ function resultToPosition(r: { legs: ComboLeg[]; cost: number; score: number }, 
 
 export default function TradeScanner({ date, chain, spotPrice }: Props) {
   const [maxResults, setMaxResults] = useState(20)
-  const [maxCostFilter, setMaxCostFilter] = useState(70)
+  const [maxCostFilter, setMaxCostFilter] = useState(90)
   const [templateMove, setTemplateMove] = useState(10)
   const [minPnl, setMinPnl] = useState(0)
   const [minPnl10, setMinPnl10] = useState(1)

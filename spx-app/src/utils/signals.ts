@@ -1,14 +1,21 @@
 import type { ChainSnapshot } from '../types'
 import { surfacePrice } from './pricing'
 
-export function comboMidCost(
+export function comboAskCost(
   legs: { strike: number; type: 'call' | 'put'; quantity: number }[],
   snapshot: ChainSnapshot
 ): number {
   return legs.reduce((sum, leg) => {
-    const bid = surfacePrice(snapshot.chain, leg.strike, leg.type, 0, false)
-    const ask = surfacePrice(snapshot.chain, leg.strike, leg.type, 0, true)
-    return sum + leg.quantity * (bid + ask) / 2
+    return sum + leg.quantity * surfacePrice(snapshot.chain, leg.strike, leg.type, 0, true)
+  }, 0)
+}
+
+export function comboBidValue(
+  legs: { strike: number; type: 'call' | 'put'; quantity: number }[],
+  snapshot: ChainSnapshot
+): number {
+  return legs.reduce((sum, leg) => {
+    return sum + leg.quantity * surfacePrice(snapshot.chain, leg.strike, leg.type, 0, false)
   }, 0)
 }
 
@@ -16,7 +23,7 @@ export function comboCostHistory(
   legs: { strike: number; type: 'call' | 'put'; quantity: number }[],
   snapshots: ChainSnapshot[]
 ): { time: string; cost: number }[] {
-  return snapshots.map(s => ({ time: s.time, cost: comboMidCost(legs, s) }))
+  return snapshots.map(s => ({ time: s.time, cost: comboAskCost(legs, s) }))
 }
 
 export function rollingZscore(
