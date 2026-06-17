@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Iron Condor — Grid Tape</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #0B0E14;
+    --panel: #12161F;
+    --panel-border: #1F2530;
+    --text: #E8E6DE;
+    --text-dim: #7D8392;
+    --amber: #D9A441;
+    --rose: #C75C4A;
+    --teal: #5FB3B3;
+    --ghost: #3A4150;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); }
+  body { font-family: 'Inter', sans-serif; padding: 32px 40px 60px; max-width: 1000px; margin: 0 auto; }
+  .eyebrow {
+    font-family: 'IBM Plex Mono', monospace; font-size: 12px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--teal); margin: 0 0 6px;
+  }
+  h1 { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 40px; letter-spacing: -0.01em; margin: 0 0 10px; }
+  .subtitle { color: var(--text-dim); font-size: 15px; max-width: 640px; line-height: 1.55; margin: 0 0 28px; }
+
+  #status {
+    background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px;
+    padding: 18px 22px; color: var(--text-dim); font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px; margin-bottom: 24px; line-height: 1.6;
+  }
+  #status button {
+    background: var(--teal); border: none; color: var(--bg); padding: 5px 12px;
+    border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 12px; margin-top: 8px;
+  }
+
+  .stats-row { display: flex; gap: 14px; margin-bottom: 24px; flex-wrap: wrap; }
+  .stat-card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px; padding: 16px 20px; min-width: 130px; flex: 1; }
+  .stat-label { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); margin-bottom: 8px; }
+  .stat-value { font-family: 'IBM Plex Mono', monospace; font-size: 25px; font-weight: 600; color: var(--amber); }
+  .stat-value.neg { color: var(--rose); }
+
+  .panel { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 12px; padding: 20px 24px; margin-bottom: 24px; }
+  .panel-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 14px; }
+  .panel-title { font-family: 'Space Grotesk', sans-serif; font-weight: 500; font-size: 16px; }
+  .panel-date { font-family: 'IBM Plex Mono', monospace; color: var(--text-dim); font-size: 13px; }
+  .panel-hint { font-family: 'IBM Plex Mono', monospace; color: var(--text-dim); font-size: 11px; }
+
+  svg { width: 100%; height: auto; display: block; }
+  .grid-line { stroke: var(--panel-border); stroke-width: 1; }
+  .grid-line.traded { stroke: var(--teal); stroke-width: 1.3; opacity: 0.85; }
+  .grid-label { fill: var(--text-dim); font-family: 'IBM Plex Mono', monospace; font-size: 11px; }
+  .price-line { fill: none; stroke: var(--text); stroke-width: 2; }
+  .mark-win { fill: var(--amber); stroke: var(--bg); stroke-width: 1; cursor: pointer; }
+  .mark-loss { fill: var(--rose); stroke: var(--bg); stroke-width: 1; cursor: pointer; }
+  .ghost-mark { stroke: var(--ghost); stroke-width: 1.4; opacity: 0.75; }
+  .zero-line { stroke: var(--panel-border); stroke-width: 1; }
+  .equity-line { fill: none; stroke: var(--teal); stroke-width: 2; }
+
+  table { width: 100%; border-collapse: collapse; font-family: 'IBM Plex Mono', monospace; font-size: 13px; }
+  th { text-align: left; color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; padding: 8px 12px; border-bottom: 1px solid var(--panel-border); }
+  td { padding: 9px 12px; border-bottom: 1px solid var(--panel-border); }
+  tbody tr { cursor: pointer; transition: background 0.15s; }
+  tbody tr:hover { background: rgba(255,255,255,0.03); }
+  tbody tr.active { background: rgba(95,179,179,0.10); }
+  .pos { color: var(--amber); }
+  .neg { color: var(--rose); }
+
+  footer { color: var(--text-dim); font-size: 12px; font-family: 'IBM Plex Mono', monospace; line-height: 1.7; }
+</style>
+</head>
+<body>
+
+  <div class="eyebrow">SPX 0DTE · IRON CONDOR</div>
+  <h1>Grid Tape</h1>
+  <p class="subtitle">
+    Sells a fresh at-the-money iron fly every time price reaches a new 15-point level it
+    hasn't traded yet that day. Already-used levels get skipped — the faint × marks on the
+    tape below are exactly those skips.
+  </p>
+
+  <div id="status">Pulling session list…</div>
+
+  <div class="stats-row">
+    <div class="stat-card"><div class="stat-label">Total P&amp;L</div><div class="stat-value" id="statPnl">—</div></div>
+    <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value" id="statWinRate">—</div></div>
+    <div class="stat-card"><div class="stat-label">Trades</div><div class="stat-value" id="statTrades">—</div></div>
+    <div class="stat-card"><div class="stat-label">Profit Factor</div><div class="stat-value" id="statPF">—</div></div>
+    <div class="stat-card"><div class="stat-label">Max Drawdown</div><div class="stat-value" id="statDD">—</div></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header">
+      <div class="panel-title">Grid Tape</div>
+      <div class="panel-date" id="gridTapeDate">—</div>
+    </div>
+    <svg id="gridTape" viewBox="0 0 900 380"></svg>
+    <div class="panel-hint">Hover a dot for entry/exit detail. Click a day below to switch tapes.</div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header"><div class="panel-title">Equity Curve</div><div class="panel-date">cumulative P&amp;L, trade by trade</div></div>
+    <svg id="equityCurve" viewBox="0 0 900 120"></svg>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header"><div class="panel-title">Days</div></div>
+    <table>
+      <thead><tr><th>Date</th><th>Trades</th><th>W / L</th><th>P&amp;L</th></tr></thead>
+      <tbody id="dayTableBody"></tbody>
+    </table>
+  </div>
+
+  <footer>
+    Assumptions: 15-pt wings · entries 09:31–15:45 ET · close at 10% of credit remaining ·
+    $0.05/contract slippage on every fill · $100 multiplier. Edit PARAMS near the top of the
+    script below to change any of these.
+  </footer>
+
+<script>
+const PARAMS = {
+  wing: 15,
+  tradeStartTime: '09:31',
+  tradeEndTime: '15:45',
+  closeAtPctOfCredit: 0.10,
+  dollarMultiplier: 100,
+  slippage: 0.05
+}
+
+// ---------- shared backtest engine (mirrors iron-condor-backtest.mjs) ----------
+
+function timeToMinutes(t) {
+  const [h, m] = t.split(':').map(Number)
+  return h * 60 + m
+}
+
+function round5(price) {
+  return Math.round(price / 5) * 5
+}
+
+function surfacePrice(chain, strike, type, useAsk) {
+  const same = chain.filter(r => r.type === type).sort((a, b) => a.strike - b.strike)
+  const getPrice = r => useAsk ? r.ask : r.bid
+  if (same.length === 0) return 0.01
+  if (strike <= same[0].strike) return Math.max(0.01, getPrice(same[0]))
+  if (strike >= same[same.length - 1].strike) return Math.max(0.01, getPrice(same[same.length - 1]))
+  let lo = 0, hi = same.length - 1
+  while (hi - lo > 1) {
+    const m = Math.floor((lo + hi) / 2)
+    if (same[m].strike < strike) lo = m; else hi = m
+  }
+  const t = (strike - same[lo].strike) / (same[hi].strike - same[lo].strike)
+  return getPrice(same[lo]) + t * (getPrice(same[hi]) - getPrice(same[lo]))
+}
+
+function buildLegs(center, wing) {
+  return [
+    { strike: center, type: 'call', quantity: -1 },
+    { strike: center + wing, type: 'call', quantity: 1 },
+    { strike: center, type: 'put', quantity: -1 },
+    { strike: center - wing, type: 'put', quantity: 1 }
+  ]
+}
+
+function legFillPrice(chain, leg, slippage, isOpening) {
+  const isBuy = isOpening ? leg.quantity > 0 : leg.quantity < 0
+  if (isBuy) return surfacePrice(chain, leg.strike, leg.type, true) + slippage
+  return Math.max(0.01, surfacePrice(chain, leg.strike, leg.type, false) - slippage)
+}
+
+function legsCost(chain, legs, slippage) {
+  return legs.reduce((s, l) => s + l.quantity * legFillPrice(chain, l, slippage, true), 0)
+}
+
+function legsValue(chain, legs, slippage) {
+  return legs.reduce((s, l) => s + l.quantity * legFillPrice(chain, l, slippage, false), 0)
+}
+
+async function fetchJSON(path) {
+  const res = await fetch(path)
+  if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`)
+  return res.json()
+}
+
+async function backtestDay(date, params) {
+  const [session, snapRes] = await Promise.all([
+    fetchJSON(`/api/sessions/${date}`),
+    fetchJSON(`/api/sessions/${date}/snapshots`).catch(() => ({ snapshots: [] }))
+  ])
+  const snapshots = snapRes.snapshots || []
+  const pricePath = session.pricePath
+  if (!pricePath || !pricePath.length) return null
+
+  const startMin = timeToMinutes(params.tradeStartTime)
+  const endMin = timeToMinutes(params.tradeEndTime)
+
+  let anchor = null
+  const tradedLevels = new Set()
+  const openPositions = []
+  const trades = []
+  const ghostEvents = []
+  let dayPnlPts = 0
+
+  function closePosition(pos, chain, exitTick, time, reason) {
+    const exitVal = legsValue(chain, pos.legs, params.slippage)
+    const pnlPts = exitVal - pos.cost
+    dayPnlPts += pnlPts
+    trades.push({
+      center: pos.center, entryTick: pos.entryTick, entryTime: pos.entryTime, entrySpot: pos.entrySpot,
+      exitTick, exitTime: time, credit: pos.credit, pnlPts, reason
+    })
+  }
+
+  for (let tick = 0; tick < pricePath.length; tick++) {
+    const spot = pricePath[tick].price
+    const tickMin = timeToMinutes(pricePath[tick].time)
+    const chain = snapshots[tick] && snapshots[tick].chain || session.openingChain || []
+    const prevSpot = tick > 0 ? pricePath[tick - 1].price : spot
+
+    if (tickMin < startMin) continue
+
+    if (anchor === null) {
+      anchor = round5(spot)
+      tradedLevels.add(anchor)
+      const legs = buildLegs(anchor, params.wing)
+      const cost = legsCost(chain, legs, params.slippage)
+      openPositions.push({ center: anchor, legs, cost, credit: -cost, entryTick: tick, entryTime: pricePath[tick].time, entrySpot: spot })
+    } else if (tickMin <= endMin && prevSpot !== spot) {
+      const lo = Math.min(prevSpot, spot), hi = Math.max(prevSpot, spot)
+      const firstN = Math.ceil((lo - anchor) / params.wing)
+      const lastN = Math.floor((hi - anchor) / params.wing)
+      const untraded = []
+      for (let n = firstN; n <= lastN; n++) {
+        const level = anchor + n * params.wing
+        if (tradedLevels.has(level)) ghostEvents.push({ tick, time: pricePath[tick].time, level })
+        else untraded.push(level)
+      }
+      if (untraded.length) {
+        untraded.sort((a, b) => Math.abs(a - spot) - Math.abs(b - spot))
+        const level = untraded[0]
+        tradedLevels.add(level)
+        const legs = buildLegs(level, params.wing)
+        const cost = legsCost(chain, legs, params.slippage)
+        openPositions.push({ center: level, legs, cost, credit: -cost, entryTick: tick, entryTime: pricePath[tick].time, entrySpot: spot })
+      }
+    }
+
+    for (let i = openPositions.length - 1; i >= 0; i--) {
+      const pos = openPositions[i]
+      if (tick <= pos.entryTick) continue
+      const costToClose = -legsValue(chain, pos.legs, params.slippage)
+      if (costToClose <= pos.credit * params.closeAtPctOfCredit) {
+        closePosition(pos, chain, tick, pricePath[tick].time, 'TP')
+        openPositions.splice(i, 1)
+      } else if (tickMin >= endMin) {
+        closePosition(pos, chain, tick, pricePath[tick].time, 'EOD')
+        openPositions.splice(i, 1)
+      }
+    }
+  }
+
+  if (openPositions.length) {
+    const finalTick = pricePath.length - 1
+    const finalChain = (snapshots[finalTick] && snapshots[finalTick].chain) || session.openingChain || []
+    for (const pos of openPositions) closePosition(pos, finalChain, finalTick, pricePath[finalTick].time, 'EOS')
+  }
+
+  return { date, pricePath, anchor, trades, ghostEvents, dayPnlPts }
+}
+
+// ---------- rendering ----------
+
+function fmtDollars(n) {
+  const sign = n < 0 ? '-' : '+'
+  return `${sign}$${Math.abs(n).toFixed(2)}`
+}
+
+function setStatus(msg) {
+  const el = document.getElementById('status')
+  el.hidden = false
+  el.innerHTML = msg
+}
+function hideStatus() { document.getElementById('status').hidden = true }
+function showError(err) {
+  setStatus(
+    `Can't load strategy data — ${err.message}.<br>` +
+    `Make sure options-api is running on port 3080 (<code>npm start</code> inside the options-api folder), then ` +
+    `<button id="retryBtn">retry</button>.`
+  )
+  document.getElementById('retryBtn').addEventListener('click', () => { hideStatus(); main() })
+}
+
+function setStat(id, value, positive) {
+  const el = document.getElementById(id)
+  el.textContent = value
+  if (positive !== undefined) el.classList.toggle('neg', !positive)
+}
+
+function renderGridTape(day) {
+  const svg = document.getElementById('gridTape')
+  const W = 900, H = 380, padL = 64, padR = 16, padT = 16, padB = 28
+  const innerW = W - padL - padR
+  const innerH = H - padT - padB
+  const n = day.pricePath.length
+  const denom = Math.max(1, n - 1)
+
+  const prices = day.pricePath.map(p => p.price)
+  let yMin = Math.min.apply(null, prices)
+  let yMax = Math.max.apply(null, prices)
+  yMin = day.anchor + (Math.floor((yMin - day.anchor) / PARAMS.wing) - 1) * PARAMS.wing
+  yMax = day.anchor + (Math.ceil((yMax - day.anchor) / PARAMS.wing) + 1) * PARAMS.wing
+
+  const xFor = i => padL + (i / denom) * innerW
+  const yFor = price => padT + innerH - ((price - yMin) / (yMax - yMin)) * innerH
+
+  const tradedSet = new Set(day.trades.map(t => t.center))
+  tradedSet.add(day.anchor)
+
+  let gridLines = ''
+  for (let level = yMin; level <= yMax + 0.001; level += PARAMS.wing) {
+    const y = yFor(level)
+    const traded = tradedSet.has(level)
+    gridLines += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" class="grid-line${traded ? ' traded' : ''}" />`
+    gridLines += `<text x="${padL - 8}" y="${y + 3}" class="grid-label" text-anchor="end">${level}</text>`
+  }
+
+  const pathPoints = day.pricePath.map((p, i) => `${xFor(i)},${yFor(p.price)}`).join(' ')
+
+  let markers = ''
+  for (const t of day.trades) {
+    const cx = xFor(t.entryTick), cy = yFor(t.center)
+    const cls = t.pnlPts >= 0 ? 'mark-win' : 'mark-loss'
+    const sign = t.pnlPts >= 0 ? '+' : ''
+    markers += `<circle cx="${cx}" cy="${cy}" r="5" class="${cls}"><title>${t.entryTime} open @ ${t.center} · credit ${t.credit.toFixed(2)} · ${t.reason} ${sign}${t.pnlPts.toFixed(2)}pts</title></circle>`
+  }
+
+  let ghosts = ''
+  for (const g of day.ghostEvents) {
+    const gx = xFor(g.tick), gy = yFor(g.level)
+    ghosts += `<path d="M${gx - 4},${gy - 4} L${gx + 4},${gy + 4} M${gx - 4},${gy + 4} L${gx + 4},${gy - 4}" class="ghost-mark"><title>${g.time} crossed ${g.level} — already traded, skipped</title></path>`
+  }
+
+  svg.innerHTML = `${gridLines}<polyline points="${pathPoints}" class="price-line" />${ghosts}${markers}`
+}
+
+function renderEquityCurve(allTrades) {
+  const svg = document.getElementById('equityCurve')
+  const W = 900, H = 120, pad = 16
+  let cum = 0
+  const pts = allTrades.map((t, i) => { cum += t.pnlPts; return { i, cum } })
+  const maxAbs = Math.max(1, ...pts.map(p => Math.abs(p.cum)))
+  const denom = Math.max(1, pts.length - 1)
+  const xFor = i => pad + (i / denom) * (W - pad * 2)
+  const yFor = c => H / 2 - (c / maxAbs) * (H / 2 - pad)
+  const line = pts.map(p => `${xFor(p.i)},${yFor(p.cum)}`).join(' ')
+  svg.innerHTML = `<line x1="${pad}" y1="${H / 2}" x2="${W - pad}" y2="${H / 2}" class="zero-line" /><polyline points="${line}" class="equity-line" />`
+}
+
+function renderDayTable(days) {
+  const tbody = document.getElementById('dayTableBody')
+  tbody.innerHTML = days.map(d => {
+    const dollars = d.dayPnlPts * PARAMS.dollarMultiplier
+    const w = d.trades.filter(t => t.pnlPts > 0).length
+    const l = d.trades.length - w
+    return `<tr data-date="${d.date}"><td>${d.date}</td><td>${d.trades.length}</td><td>${w}W / ${l}L</td><td class="${dollars >= 0 ? 'pos' : 'neg'}">${fmtDollars(dollars)}</td></tr>`
+  }).join('')
+  tbody.querySelectorAll('tr').forEach(row => {
+    row.addEventListener('click', () => {
+      const day = days.find(d => d.date === row.dataset.date)
+      selectDay(day)
+    })
+  })
+}
+
+function selectDay(day) {
+  document.getElementById('gridTapeDate').textContent = day.date
+  renderGridTape(day)
+  document.querySelectorAll('#dayTableBody tr').forEach(r => r.classList.toggle('active', r.dataset.date === day.date))
+}
+
+function renderAll(days) {
+  const allTrades = days.flatMap(d => d.trades.map(t => Object.assign({}, t, { date: d.date })))
+  const totalTrades = allTrades.length
+  const wins = allTrades.filter(t => t.pnlPts > 0)
+  const losses = allTrades.filter(t => t.pnlPts <= 0)
+  const cumPnlPts = allTrades.reduce((s, t) => s + t.pnlPts, 0)
+  const winRate = totalTrades ? wins.length / totalTrades : 0
+  const avgWin = wins.length ? wins.reduce((s, t) => s + t.pnlPts, 0) / wins.length : 0
+  const avgLoss = losses.length ? losses.reduce((s, t) => s + t.pnlPts, 0) / losses.length : 0
+  const pf = losses.length && avgLoss !== 0 ? Math.abs((wins.length * avgWin) / (losses.length * avgLoss)) : 0
+
+  let peak = 0, cum = 0, maxDD = 0
+  for (const t of allTrades) {
+    cum += t.pnlPts
+    if (cum > peak) peak = cum
+    const dd = peak > 0 ? (peak - cum) / peak : 0
+    if (dd > maxDD) maxDD = dd
+  }
+
+  setStat('statPnl', fmtDollars(cumPnlPts * PARAMS.dollarMultiplier), cumPnlPts >= 0)
+  setStat('statWinRate', (winRate * 100).toFixed(1) + '%')
+  setStat('statTrades', String(totalTrades))
+  setStat('statPF', pf.toFixed(2))
+  setStat('statDD', (maxDD * 100).toFixed(1) + '%')
+
+  renderEquityCurve(allTrades)
+  renderDayTable(days)
+  selectDay(days[days.length - 1])
+  hideStatus()
+}
+
+async function main() {
+  setStatus('Pulling session list…')
+  let sessions
+  try {
+    sessions = await fetchJSON('/api/sessions')
+  } catch (err) {
+    showError(err)
+    return
+  }
+  const dates = sessions.sessions.filter(s => s.hasSnapshots).map(s => s.date).sort()
+  const days = []
+  for (let i = 0; i < dates.length; i++) {
+    setStatus(`Backtesting ${dates[i]} (${i + 1}/${dates.length})…`)
+    try {
+      const day = await backtestDay(dates[i], PARAMS)
+      if (day) days.push(day)
+    } catch (err) {
+      console.error('Failed on', dates[i], err)
+    }
+  }
+  if (!days.length) {
+    showError(new Error('No tradable sessions returned data'))
+    return
+  }
+  renderAll(days)
+}
+
+main()
+</script>
+</body>
+</html>
