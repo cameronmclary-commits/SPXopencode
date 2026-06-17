@@ -1,6 +1,4 @@
 import http from 'http'
-import fs from 'fs'
-import path from 'path'
 
 const BASE = 'http://localhost:3080'
 
@@ -16,692 +14,214 @@ function fetch(path) {
   })
 }
 
-/**
- * Find the closest strike at or below the target price
- */
-function getStrikeAtOrBelow(chain, targetStrike, type) {
-  const options = chain.filter(r => r.type === type).sort((a, b) => b.strike - a.strike)
-  for (const opt of options) {
-    if (opt.strike <= targetStrike) return opt
+// Interpolates a raw bid or ask quote for an arbitrary strike from the chain.
+// useAsk=true -> ask quote. useAsk=false -> bid quote. (Direction-aware buy/sell logic lives in legFillPrice below.)
+function surfacePrice(chain, strike, type, useAsk) {
+  const same = chain.filter(r => r.type === type).sort((a, b) => a.strike - b.strike)
+  const getPrice = r => useAsk ? r.ask : r.bid
+  if (same.length === 0) return 0.01
+  if (strike <= same[0].strike) return Math.max(0.01, getPrice(same[0]))
+  if (strike >= same[same.length - 1].strike) return Math.max(0.01, getPrice(same[same.length - 1]))
+  let lo = 0, hi = same.length - 1
+  while (hi - lo > 1) {
+    const m = Math.floor((lo + hi) / 2)
+    if (same[m].strike < strike) lo = m; else hi = m
   }
-  return null
+  const t = (strike - same[lo].strike) / (same[hi].strike - same[lo].strike)
+  return getPrice(same[lo]) + t * (getPrice(same[hi]) - getPrice(same[lo]))
 }
 
-/**
- * Get price for a specific strike and type
- */
-function getOptionPrice(chain, strike, type, useMid = true) {
-  const option = chain.find(r => r.strike === strike && r.type === type)
-  if (!option) return null
-  if (useMid) return (option.bid + option.ask) / 2
-  return { bid: option.bid, ask: option.ask, mid: (option.bid + option.ask) / 2 }
+function timeToMinutes(t) {
+  const [h, m] = t.split(':').map(Number)
+  return h * 60 + m
 }
 
-/**
- * Calculate the cost/credit of an Iron Condor
- */
-function getIronCondorCredit(chain, spot) {
-  const shortCallStrike = Math.ceil(spot / 5) * 5
-  const longCallStrike = shortCallStrike + 15
-  const shortPutStrike = Math.floor(spot / 5) * 5
-  const longPutStrike = shortPutStrike - 15
+function round5(price) {
+  return Math.round(price / 5) * 5
+}
 
-  const shortCall = getOptionPrice(chain, shortCallStrike, 'call')
-  const longCall = getOptionPrice(chain, longCallStrike, 'call')
-  const shortPut = getOptionPrice(chain, shortPutStrike, 'put')
-  const longPut = getOptionPrice(chain, longPutStrike, 'put')
+// Builds the 4 legs of an at-the-money short straddle with `wing` point wings:
+// SELL call @ center, BUY call @ center+wing, SELL put @ center, BUY put @ center-wing
+function buildLegs(center, wing) {
+  return [
+    { strike: center, type: 'call', quantity: -1 },
+    { strike: center + wing, type: 'call', quantity: 1 },
+    { strike: center, type: 'put', quantity: -1 },
+    { strike: center - wing, type: 'put', quantity: 1 }
+  ]
+}
 
-  if (!shortCall || !longCall || !shortPut || !longPut) return null
-
-  const credit = (shortCall + shortPut) - (longCall + longPut)
-  
-  return {
-    credit: Math.round(credit * 100) / 100,
-    shortCallStrike,
-    longCallStrike,
-    shortPutStrike,
-    longPutStrike,
-    legs: [
-      { type: 'call', strike: shortCallStrike, action: 'sell', price: shortCall },
-      { type: 'call', strike: longCallStrike, action: 'buy', price: longCall },
-      { type: 'put', strike: shortPutStrike, action: 'sell', price: shortPut },
-      { type: 'put', strike: longPutStrike, action: 'buy', price: longPut },
-    ]
+// Fill price for one leg's transaction. Whether it's a buy or a sell depends on
+// BOTH the leg's sign (long/short) AND whether we're opening or closing:
+//   opening a long leg  -> BUY  -> ask + slippage
+//   opening a short leg -> SELL -> bid - slippage
+//   closing a long leg  -> SELL -> bid - slippage
+//   closing a short leg -> BUY  -> ask + slippage
+function legFillPrice(chain, leg, slippage, isOpening) {
+  const isBuy = isOpening ? leg.quantity > 0 : leg.quantity < 0
+  if (isBuy) {
+    return surfacePrice(chain, leg.strike, leg.type, true) + slippage
   }
+  return Math.max(0.01, surfacePrice(chain, leg.strike, leg.type, false) - slippage)
 }
 
-/**
- * Calculate current mark of an Iron Condor position
- */
-function getIronCondorMark(chain, shortCallStrike, longCallStrike, shortPutStrike, longPutStrike) {
-  const shortCall = getOptionPrice(chain, shortCallStrike, 'call')
-  const longCall = getOptionPrice(chain, longCallStrike, 'call')
-  const shortPut = getOptionPrice(chain, shortPutStrike, 'put')
-  const longPut = getOptionPrice(chain, longPutStrike, 'put')
-
-  if (!shortCall || !longCall || !shortPut || !longPut) return null
-
-  const cost = (shortCall + shortPut) - (longCall + longPut)
-  return Math.round(cost * 100) / 100
+// cost = sum(qty * fillPrice) at OPEN -> negative cost == credit received
+function legsCost(chain, legs, slippage) {
+  return legs.reduce((s, l) => s + l.quantity * legFillPrice(chain, l, slippage, true), 0)
 }
 
-/**
- * Generate HTML chart for visualization
- */
-function generateHTMLChart(data) {
-  return `<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Iron Condor Strategy Backtest Results</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #0f172a;
-            color: #e2e8f0;
-            padding: 20px;
-        }
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-        }
-        .header {
-            text-align: center;
-            margin-bottom: 40px;
-        }
-        .header h1 {
-            font-size: 32px;
-            margin-bottom: 10px;
-            color: #22c55e;
-        }
-        .metrics {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin-bottom: 40px;
-        }
-        .metric-card {
-            background: #1e293b;
-            border: 1px solid #334155;
-            border-radius: 8px;
-            padding: 20px;
-            text-align: center;
-        }
-        .metric-label {
-            font-size: 12px;
-            color: #94a3b8;
-            text-transform: uppercase;
-            margin-bottom: 8px;
-            letter-spacing: 0.5px;
-        }
-        .metric-value {
-            font-size: 24px;
-            font-weight: bold;
-            color: #22c55e;
-        }
-        .metric-value.negative {
-            color: #ef4444;
-        }
-        .metric-value.neutral {
-            color: #94a3b8;
-        }
-        .charts {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
-            gap: 30px;
-            margin-bottom: 40px;
-        }
-        .chart-container {
-            background: #1e293b;
-            border: 1px solid #334155;
-            border-radius: 8px;
-            padding: 20px;
-            position: relative;
-        }
-        .chart-title {
-            font-size: 16px;
-            font-weight: 600;
-            margin-bottom: 15px;
-            color: #cbd5e1;
-        }
-        .chart-wrapper {
-            position: relative;
-            height: 400px;
-        }
-        .summary-table {
-            background: #1e293b;
-            border: 1px solid #334155;
-            border-radius: 8px;
-            overflow: hidden;
-            margin-top: 30px;
-        }
-        .summary-table thead {
-            background: #0f172a;
-            border-bottom: 2px solid #334155;
-        }
-        .summary-table th {
-            padding: 15px;
-            text-align: left;
-            font-size: 12px;
-            color: #94a3b8;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            font-weight: 600;
-        }
-        .summary-table td {
-            padding: 12px 15px;
-            border-bottom: 1px solid #334155;
-            font-size: 14px;
-        }
-        .summary-table tbody tr:hover {
-            background: #0f172a;
-        }
-        .summary-table tbody tr:last-child td {
-            border-bottom: none;
-        }
-        .profit { color: #22c55e; }
-        .loss { color: #ef4444; }
-        .neutral { color: #94a3b8; }
-        .footer {
-            text-align: center;
-            margin-top: 40px;
-            font-size: 12px;
-            color: #64748b;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🎯 Iron Condor Strategy Backtest</h1>
-            <p>Progressive selling strategy with 1-minute OPRA data</p>
-        </div>
-
-        <div class="metrics">
-            <div class="metric-card">
-                <div class="metric-label">Total Trades</div>
-                <div class="metric-value">${data.summary.totalTrades}</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-label">Win Rate</div>
-                <div class="metric-value">${data.summary.winRate.toFixed(1)}%</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-label">Total P&L</div>
-                <div class="metric-value ${data.summary.totalPnl >= 0 ? '' : 'negative'}">$${data.summary.totalPnl.toFixed(2)}</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-label">Avg Per Trade</div>
-                <div class="metric-value ${data.summary.avgPerTrade >= 0 ? '' : 'negative'}">$${data.summary.avgPerTrade.toFixed(2)}</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-label">Profit Factor</div>
-                <div class="metric-value">${data.summary.profitFactor.toFixed(2)}x</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-label">Max Drawdown</div>
-                <div class="metric-value negative">${data.summary.maxDrawdown.toFixed(2)}%</div>
-            </div>
-        </div>
-
-        <div class="charts">
-            <div class="chart-container">
-                <div class="chart-title">📈 Cumulative P&L Over Time</div>
-                <div class="chart-wrapper">
-                    <canvas id="pnlChart"></canvas>
-                </div>
-            </div>
-            <div class="chart-container">
-                <div class="chart-title">📊 Daily P&L Distribution</div>
-                <div class="chart-wrapper">
-                    <canvas id="dailyChart"></canvas>
-                </div>
-            </div>
-            <div class="chart-container">
-                <div class="chart-title">🏆 Win/Loss by Day</div>
-                <div class="chart-wrapper">
-                    <canvas id="winLossChart"></canvas>
-                </div>
-            </div>
-            <div class="chart-container">
-                <div class="chart-title">💰 Trade Size Distribution</div>
-                <div class="chart-wrapper">
-                    <canvas id="tradeDistChart"></canvas>
-                </div>
-            </div>
-        </div>
-
-        <div class="summary-table">
-            <table style="width: 100%; border-collapse: collapse;">
-                <thead>
-                    <tr>
-                        <th>Date</th>
-                        <th>Trades</th>
-                        <th>Wins</th>
-                        <th>Losses</th>
-                        <th>Win Rate</th>
-                        <th>Daily P&L</th>
-                        <th>Avg Trade</th>
-                        <th>Cumulative P&L</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${data.dailyData.map((day, idx) => `
-                        <tr>
-                            <td>${day.date}</td>
-                            <td>${day.tradesCount}</td>
-                            <td class="profit">${day.wins}</td>
-                            <td class="loss">${day.losses}</td>
-                            <td>${day.winRate.toFixed(1)}%</td>
-                            <td class="${day.dailyPnl >= 0 ? 'profit' : 'loss'}">$${day.dailyPnl.toFixed(2)}</td>
-                            <td class="${day.avgTrade >= 0 ? 'profit' : 'loss'}">$${day.avgTrade.toFixed(2)}</td>
-                            <td class="${day.cumulativePnl >= 0 ? 'profit' : 'loss'}">$${day.cumulativePnl.toFixed(2)}</td>
-                        </tr>
-                    `).join('')}
-                </tbody>
-            </table>
-        </div>
-
-        <div class="footer">
-            Generated on ${new Date().toLocaleString()} | Strategy runs 10:30 AM - 3:45 PM ET | 15-point progressive scaling
-        </div>
-    </div>
-
-    <script>
-        const chartDefaults = {
-            backgroundColor: 'rgba(34, 197, 94, 0.1)',
-            borderColor: '#22c55e',
-            borderWidth: 2,
-            fill: true,
-            tension: 0.4,
-            pointRadius: 4,
-            pointBackgroundColor: '#22c55e',
-            pointBorderColor: '#1e293b',
-            pointBorderWidth: 2,
-            pointHoverRadius: 6,
-        };
-
-        // Cumulative P&L Chart
-        const ctx1 = document.getElementById('pnlChart').getContext('2d');
-        new Chart(ctx1, {
-            type: 'line',
-            data: {
-                labels: ${JSON.stringify(data.cumulativePnlChart.labels)},
-                datasets: [{
-                    label: 'Cumulative P&L',
-                    data: ${JSON.stringify(data.cumulativePnlChart.data)},
-                    ...chartDefaults,
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: { display: false },
-                    filler: { propagate: true }
-                },
-                scales: {
-                    x: { display: false },
-                    y: {
-                        beginAtZero: true,
-                        grid: { color: 'rgba(148, 163, 184, 0.1)' },
-                        ticks: { color: '#94a3b8' }
-                    }
-                }
-            }
-        });
-
-        // Daily P&L Distribution
-        const ctx2 = document.getElementById('dailyChart').getContext('2d');
-        new Chart(ctx2, {
-            type: 'bar',
-            data: {
-                labels: ${JSON.stringify(data.dailyPnlChart.labels)},
-                datasets: [{
-                    label: 'Daily P&L',
-                    data: ${JSON.stringify(data.dailyPnlChart.data)},
-                    backgroundColor: ${JSON.stringify(data.dailyPnlChart.colors)},
-                    borderRadius: 4,
-                    borderSkipped: false,
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: { display: false },
-                },
-                scales: {
-                    x: { grid: { display: false }, ticks: { color: '#94a3b8', maxRotation: 45, minRotation: 0 } },
-                    y: { grid: { color: 'rgba(148, 163, 184, 0.1)' }, ticks: { color: '#94a3b8' } }
-                }
-            }
-        });
-
-        // Win/Loss by Day
-        const ctx3 = document.getElementById('winLossChart').getContext('2d');
-        new Chart(ctx3, {
-            type: 'bar',
-            data: {
-                labels: ${JSON.stringify(data.winLossChart.labels)},
-                datasets: [
-                    {
-                        label: 'Wins',
-                        data: ${JSON.stringify(data.winLossChart.wins)},
-                        backgroundColor: 'rgba(34, 197, 94, 0.8)',
-                    },
-                    {
-                        label: 'Losses',
-                        data: ${JSON.stringify(data.winLossChart.losses)},
-                        backgroundColor: 'rgba(239, 68, 68, 0.8)',
-                    }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: { labels: { color: '#94a3b8' } },
-                },
-                scales: {
-                    x: { grid: { display: false }, ticks: { color: '#94a3b8', maxRotation: 45, minRotation: 0 }, stacked: true },
-                    y: { grid: { color: 'rgba(148, 163, 184, 0.1)' }, ticks: { color: '#94a3b8' }, stacked: true }
-                }
-            }
-        });
-
-        // Trade Size Distribution
-        const ctx4 = document.getElementById('tradeDistChart').getContext('2d');
-        new Chart(ctx4, {
-            type: 'doughnut',
-            data: {
-                labels: ${JSON.stringify(data.tradeDistChart.labels)},
-                datasets: [{
-                    data: ${JSON.stringify(data.tradeDistChart.data)},
-                    backgroundColor: [
-                        'rgba(34, 197, 94, 0.8)',
-                        'rgba(59, 130, 246, 0.8)',
-                        'rgba(249, 115, 22, 0.8)',
-                        'rgba(168, 85, 247, 0.8)',
-                    ],
-                    borderColor: '#1e293b',
-                    borderWidth: 2,
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: { labels: { color: '#94a3b8' } },
-                }
-            }
-        });
-    </script>
-</body>
-</html>`
+// value = sum(qty * fillPrice) if CLOSED right now
+function legsValue(chain, legs, slippage) {
+  return legs.reduce((s, l) => s + l.quantity * legFillPrice(chain, l, slippage, false), 0)
 }
 
-/**
- * Main backtest function with visualization
- */
+// ---- Grid stepping logic ----
+// Anchored to the first entry's center strike. A new trade fires only when price
+// actually reaches a 15-point grid level (anchor + n*wing) that has NEVER been
+// traded that day, regardless of how many already-traded levels it passes on the way.
+function nextGridEntry(prevSpot, currSpot, anchor, wing, tradedLevels) {
+  if (prevSpot === currSpot) return null
+  const lo = Math.min(prevSpot, currSpot)
+  const hi = Math.max(prevSpot, currSpot)
+  const firstN = Math.ceil((lo - anchor) / wing)
+  const lastN = Math.floor((hi - anchor) / wing)
+  const candidates = []
+  for (let n = firstN; n <= lastN; n++) {
+    const level = anchor + n * wing
+    if (!tradedLevels.has(level)) candidates.push(level)
+  }
+  if (candidates.length === 0) return null
+  // If price gapped across more than one untraded level in a single tick,
+  // take the one closest to where price ended up (most representative fill).
+  candidates.sort((a, b) => Math.abs(a - currSpot) - Math.abs(b - currSpot))
+  return candidates[0]
+}
+
 async function run() {
-  try {
-    const sessions = await fetch('/api/sessions')
-    const dates = sessions.sessions.filter(s => s.hasSnapshots).map(s => s.date)
-    
-    if (dates.length === 0) {
-      console.log('No sessions with snapshots available')
-      return
-    }
+  const sessions = await fetch('/api/sessions')
+  const dates = sessions.sessions.filter(s => s.hasSnapshots).map(s => s.date)
+  console.log(`Running Iron Condor grid-step backtest on ${dates.length} dates...`)
 
-    console.log(`Running Iron Condor progressive strategy on ${dates.length} dates...\n`)
-
-    const params = {
-      initialSpotOffset: 0,
-      wingWidth: 15,
-      scalingDistance: 15,
-      tradeStartTime: '10:30',
-      tradeEndTime: '15:45',
-    }
-
-    let totalTrades = 0
-    let profitableTrades = 0
-    let totalPnl = 0
-    let totalWinPnl = 0
-    let totalLossPnl = 0
-    let peakCapital = 0
-    let maxDD = 0
-    let peak = 0
-
-    const dailyData = []
-    const cumulativePnlPoints = []
-    let runningPnl = 0
-
-    const timeToMinutes = t => {
-      const [h, m] = t.split(':').map(Number)
-      return h * 60 + m
-    }
-
-    const tradeStartMin = timeToMinutes(params.tradeStartTime)
-    const tradeEndMin = timeToMinutes(params.tradeEndTime)
-
-    for (const date of dates) {
-      const [session, snapsRes] = await Promise.all([
-        fetch(`/api/sessions/${date}`),
-        fetch(`/api/sessions/${date}/snapshots`).catch(() => ({ snapshots: [] }))
-      ])
-
-      const snapshots = snapsRes.snapshots || []
-      if (snapshots.length === 0) continue
-
-      let dayTrades = 0
-      let dayWins = 0
-      let dayLosses = 0
-      let dayPnl = 0
-      let dayWinPnl = 0
-      let dayLossPnl = 0
-
-      const positions = []
-      let nextScaleSpot = null
-
-      for (let i = 0; i < snapshots.length; i++) {
-        const snap = snapshots[i]
-        const [h, m] = snap.time.split(':').map(Number)
-        const curMin = h * 60 + m
-        const spot = snap.spot
-        const chain = snap.chain
-
-        // Close positions
-        for (let pi = positions.length - 1; pi >= 0; pi--) {
-          const pos = positions[pi]
-          const mark = getIronCondorMark(chain, pos.shortCall, pos.longCall, pos.shortPut, pos.longPut)
-          
-          if (mark === null) continue
-
-          pos.currentMark = mark
-          pos.unrealizedPnl = pos.credit - mark
-
-          const closeThreshold = Math.max(0.05, pos.credit * 0.1)
-          if (mark <= closeThreshold || pos.unrealizedPnl >= pos.credit * 0.9) {
-            pos.finalPnl = pos.credit - mark
-            dayPnl += pos.finalPnl
-            dayTrades++
-            if (pos.finalPnl > 0) {
-              dayWins++
-              dayWinPnl += pos.finalPnl
-            } else {
-              dayLosses++
-              dayLossPnl += pos.finalPnl
-            }
-            positions.splice(pi, 1)
-          }
-        }
-
-        // Scale in
-        if (curMin >= tradeStartMin && curMin <= tradeEndMin) {
-          const shouldScale = 
-            nextScaleSpot === null || 
-            Math.abs(spot - nextScaleSpot) >= params.scalingDistance
-
-          if (shouldScale) {
-            const ic = getIronCondorCredit(chain, spot)
-            if (ic && ic.credit > 0) {
-              positions.push({
-                enteredAtTime: snap.time,
-                enteredAtSpot: spot,
-                credit: ic.credit,
-                shortCall: ic.shortCallStrike,
-                longCall: ic.longCallStrike,
-                shortPut: ic.shortPutStrike,
-                longPut: ic.longPutStrike,
-                currentMark: ic.credit,
-                unrealizedPnl: 0,
-              })
-              nextScaleSpot = spot
-            }
-          }
-        } else if (curMin > tradeEndMin && positions.length > 0) {
-          for (const pos of positions) {
-            const mark = getIronCondorMark(chain, pos.shortCall, pos.longCall, pos.shortPut, pos.longPut)
-            if (mark !== null) {
-              pos.finalPnl = pos.credit - mark
-              dayPnl += pos.finalPnl
-              dayTrades++
-              if (pos.finalPnl > 0) {
-                dayWins++
-                dayWinPnl += pos.finalPnl
-              } else {
-                dayLosses++
-                dayLossPnl += pos.finalPnl
-              }
-            }
-          }
-          positions.length = 0
-        }
-      }
-
-      if (positions.length > 0) {
-        const lastSnap = snapshots[snapshots.length - 1]
-        for (const pos of positions) {
-          const mark = getIronCondorMark(lastSnap.chain, pos.shortCall, pos.longCall, pos.shortPut, pos.longPut)
-          if (mark !== null) {
-            pos.finalPnl = pos.credit - mark
-            dayPnl += pos.finalPnl
-            dayTrades++
-            if (pos.finalPnl > 0) {
-              dayWins++
-              dayWinPnl += pos.finalPnl
-            } else {
-              dayLosses++
-              dayLossPnl += pos.finalPnl
-            }
-          }
-        }
-      }
-
-      if (dayTrades > 0) {
-        runningPnl += dayPnl
-        cumulativePnlPoints.push({ date, pnl: runningPnl })
-
-        dailyData.push({
-          date,
-          tradesCount: dayTrades,
-          wins: dayWins,
-          losses: dayLosses,
-          winRate: (dayWins / dayTrades) * 100,
-          dailyPnl: dayPnl,
-          avgTrade: dayPnl / dayTrades,
-          cumulativePnl: runningPnl,
-        })
-
-        console.log(`${date}: ${dayTrades} trades, ${dayWins}W/${dayLosses}L, Daily P&L: $${dayPnl.toFixed(2)}, Cumulative: $${runningPnl.toFixed(2)}`)
-      }
-
-      totalTrades += dayTrades
-      profitableTrades += dayWins
-      totalPnl += dayPnl
-      totalWinPnl += dayWinPnl
-      totalLossPnl += dayLossPnl
-
-      if (runningPnl > peak) peak = runningPnl
-      const dd = peak > 0 ? ((peak - runningPnl) / peak) * 100 : 0
-      if (dd > maxDD) maxDD = dd
-    }
-
-    const winRate = totalTrades > 0 ? (profitableTrades / totalTrades) * 100 : 0
-    const avgPerTrade = totalTrades > 0 ? totalPnl / totalTrades : 0
-    const profitFactor = totalLossPnl !== 0 ? Math.abs(totalWinPnl / totalLossPnl) : 0
-
-    const summary = {
-      totalTrades,
-      winRate,
-      totalPnl,
-      avgPerTrade,
-      profitFactor,
-      maxDrawdown: maxDD,
-    }
-
-    // Prepare chart data
-    const cumulativePnlChart = {
-      labels: cumulativePnlPoints.map(p => p.date),
-      data: cumulativePnlPoints.map(p => p.pnl),
-    }
-
-    const dailyPnlChart = {
-      labels: dailyData.map(d => d.date),
-      data: dailyData.map(d => d.dailyPnl),
-      colors: dailyData.map(d => d.dailyPnl >= 0 ? 'rgba(34, 197, 94, 0.8)' : 'rgba(239, 68, 68, 0.8)'),
-    }
-
-    const winLossChart = {
-      labels: dailyData.map(d => d.date),
-      wins: dailyData.map(d => d.wins),
-      losses: dailyData.map(d => d.losses),
-    }
-
-    // Trade size buckets
-    const allTrades = dailyData.reduce((sum, d) => sum + d.tradesCount, 0)
-    const profitableCount = dailyData.reduce((sum, d) => sum + d.wins, 0)
-    const smallTrades = Math.floor(allTrades * 0.3)
-    const mediumTrades = Math.floor(allTrades * 0.5)
-    const largeTrades = allTrades - smallTrades - mediumTrades
-
-    const tradeDistChart = {
-      labels: ['Highly Profitable (>$75)', 'Profitable ($25-$75)', 'Break-even to Small Loss (<$25)'],
-      data: [largeTrades, mediumTrades, smallTrades],
-    }
-
-    const htmlData = {
-      summary,
-      dailyData,
-      cumulativePnlChart,
-      dailyPnlChart,
-      winLossChart,
-      tradeDistChart,
-    }
-
-    const html = generateHTMLChart(htmlData)
-    const outputPath = path.resolve('iron-condor-backtest-results.html')
-    fs.writeFileSync(outputPath, html)
-
-    console.log(`\n${'='.repeat(60)}`)
-    console.log(`IRON CONDOR STRATEGY RESULTS`)
-    console.log(`${'='.repeat(60)}`)
-    console.log(`Total Trades: ${totalTrades}`)
-    console.log(`Win Rate: ${winRate.toFixed(1)}%`)
-    console.log(`Total P&L: $${totalPnl.toFixed(2)}`)
-    console.log(`Average Per Trade: $${avgPerTrade.toFixed(2)}`)
-    console.log(`Profit Factor: ${profitFactor.toFixed(2)}x`)
-    console.log(`Max Drawdown: ${maxDD.toFixed(2)}%`)
-    console.log(`${'='.repeat(60)}`)
-    console.log(`\n✅ Visualization saved to: ${outputPath}`)
-    console.log(`📊 Open the HTML file in your browser to see charts and detailed metrics`)
-
-  } catch (err) {
-    console.error('Error:', err.message)
+  const params = {
+    wing: 15,              // wing width / grid step size
+    tradeStartTime: '09:31',
+    tradeEndTime: '15:45',
+    closeAtPctOfCredit: 0.10, // close a position once its cost-to-close drops to this fraction of the credit received
+    dollarMultiplier: 100,    // SPX option contract multiplier
+    slippage: 0.05            // per-contract slippage allowance added/subtracted on every fill
   }
+
+  let cumPnlPts = 0
+  let totalTrades = 0, wins = 0, losses = 0
+  let totalWinPnl = 0, totalLossPnl = 0
+  let maxDD = 0, peak = 0
+  const dailyResults = []
+
+  for (let di = 0; di < dates.length; di++) {
+    const date = dates[di]
+    const [session, snapRes] = await Promise.all([
+      fetch(`/api/sessions/${date}`),
+      fetch(`/api/sessions/${date}/snapshots`).catch(() => ({ snapshots: [] }))
+    ])
+    const snapshots = snapRes.snapshots || []
+    const pricePath = session.pricePath
+    if (!pricePath?.length) continue
+
+    const startMin = timeToMinutes(params.tradeStartTime)
+    const endMin = timeToMinutes(params.tradeEndTime)
+
+    let anchor = null
+    const tradedLevels = new Set()
+    const openPositions = [] // { center, legs, cost, credit, entryTick, entryTime, entrySpot }
+
+    let dayPnlPts = 0, dayTrades = 0, dayWins = 0, dayLosses = 0
+
+    function closePosition(pos, chain, tickMin, time, reason) {
+      const exitVal = legsValue(chain, pos.legs, params.slippage) // direction-aware fill value of the signed position
+      const pnlPts = exitVal - pos.cost // exit fill value minus entry fill cost
+      cumPnlPts += pnlPts
+      dayPnlPts += pnlPts
+      totalTrades++; dayTrades++
+      if (pnlPts > 0) { wins++; dayWins++; totalWinPnl += pnlPts }
+      else { losses++; dayLosses++; totalLossPnl += pnlPts }
+      if (cumPnlPts > peak) peak = cumPnlPts
+      const dd = peak > 0 ? (peak - cumPnlPts) / peak : 0
+      if (dd > maxDD) maxDD = dd
+      const dollarPnl = pnlPts * params.dollarMultiplier
+      console.log(`${date} ${time} CLOSE(${reason}) center=${pos.center} entry=${pos.entryTime}@${pos.entrySpot} credit=${pos.credit.toFixed(2)} pnl=${pnlPts.toFixed(2)}pts ($${dollarPnl.toFixed(2)})`)
+    }
+
+    for (let tick = 0; tick < pricePath.length; tick++) {
+      const spot = pricePath[tick].price
+      const tickMin = timeToMinutes(pricePath[tick].time)
+      const chain = snapshots[tick]?.chain || session.openingChain || []
+      const prevSpot = tick > 0 ? pricePath[tick - 1].price : spot
+
+      if (tickMin < startMin) continue
+
+      // First trade of the day: sets the grid anchor
+      if (anchor === null && tickMin >= startMin) {
+        anchor = round5(spot)
+        tradedLevels.add(anchor)
+        const legs = buildLegs(anchor, params.wing)
+        const cost = legsCost(chain, legs, params.slippage)
+        const credit = -cost
+        openPositions.push({ center: anchor, legs, cost, credit, entryTick: tick, entryTime: pricePath[tick].time, entrySpot: spot })
+        console.log(`${date} ${pricePath[tick].time} OPEN center=${anchor} spot=${spot} credit=${credit.toFixed(2)}`)
+      } else if (anchor !== null && tickMin <= endMin) {
+        const level = nextGridEntry(prevSpot, spot, anchor, params.wing, tradedLevels)
+        if (level !== null) {
+          tradedLevels.add(level)
+          const legs = buildLegs(level, params.wing)
+          const cost = legsCost(chain, legs, params.slippage)
+          const credit = -cost
+          openPositions.push({ center: level, legs, cost, credit, entryTick: tick, entryTime: pricePath[tick].time, entrySpot: spot })
+          console.log(`${date} ${pricePath[tick].time} OPEN center=${level} spot=${spot} credit=${credit.toFixed(2)}`)
+        }
+      }
+
+      // Check open positions for profit-taking close
+      for (let i = openPositions.length - 1; i >= 0; i--) {
+        const pos = openPositions[i]
+        if (tick <= pos.entryTick) continue
+        const costToClose = -legsValue(chain, pos.legs, params.slippage)
+        // costToClose is what it would cost (direction-aware fills) to flatten the position right now; lower is better for us
+        if (costToClose <= pos.credit * params.closeAtPctOfCredit) {
+          closePosition(pos, chain, tickMin, pricePath[tick].time, 'TP')
+          openPositions.splice(i, 1)
+        } else if (tickMin >= endMin) {
+          closePosition(pos, chain, tickMin, pricePath[tick].time, 'EOD')
+          openPositions.splice(i, 1)
+        }
+      }
+    }
+
+    // Force-close anything still open at the very end of the data
+    if (openPositions.length > 0) {
+      const finalTick = pricePath.length - 1
+      const finalChain = snapshots[finalTick]?.chain || session.openingChain || []
+      for (const pos of openPositions) {
+        closePosition(pos, finalChain, timeToMinutes(pricePath[finalTick].time), pricePath[finalTick].time, 'EOS')
+      }
+    }
+
+    dailyResults.push({ date, trades: dayTrades, wins: dayWins, losses: dayLosses, pnlPts: dayPnlPts, pnlDollars: dayPnlPts * params.dollarMultiplier })
+    console.log(`${date} SUMMARY: ${dayTrades} trades, ${dayWins}W/${dayLosses}L, P&L: ${dayPnlPts.toFixed(2)}pts ($${(dayPnlPts * params.dollarMultiplier).toFixed(2)})`)
+  }
+
+  const winRate = totalTrades > 0 ? wins / totalTrades : 0
+  const avgWin = wins > 0 ? totalWinPnl / wins : 0
+  const avgLoss = losses > 0 ? totalLossPnl / losses : 0
+  const pf = losses > 0 && avgLoss !== 0 ? Math.abs((wins * avgWin) / (losses * avgLoss)) : 0
+
+  console.log(`\n=== IRON CONDOR GRID-STEP RESULTS ===`)
+  console.log(`Trading Days: ${dailyResults.length}`)
+  console.log(`Total Trades: ${totalTrades}`)
+  console.log(`Win Rate: ${(winRate * 100).toFixed(1)}%`)
+  console.log(`Total P&L: ${cumPnlPts.toFixed(2)} pts ($${(cumPnlPts * params.dollarMultiplier).toFixed(2)})`)
+  console.log(`Avg Win: ${avgWin.toFixed(2)}pts | Avg Loss: ${avgLoss.toFixed(2)}pts`)
+  console.log(`Profit Factor: ${pf.toFixed(2)}`)
+  console.log(`Max Drawdown: ${(maxDD * 100).toFixed(1)}%`)
 }
 
 run().catch(console.error)
