@@ -26,7 +26,7 @@ interface BacktestResult {
 
 interface Params {
   maxCost: number; scanInterval: number; tpPoints: number; slPoints: number
-  templateMove: number; minPnl: number; minSideDelta: number; minBalance: number; minGap: number; maxStep: number
+  templateMove: number; minPnl10: number; minPnl: number; minPnlHalf: number; minSideDelta: number; minBalance: number; minGap: number; minSpotGap: number; maxStep: number
 }
 
 function timeToMinutes(t: string): number {
@@ -63,7 +63,7 @@ async function runBacktest(dates: string[], params: Params, onProgress: (u: { pc
       const chain = snapshots[tick]?.chain || session.openingChain
 
       if (!openTrade && !tradeTakenThisDay && tickMin >= nextScanMin) {
-        const results = findBestCombo(chain, spot, params.maxCost, params.templateMove, params.minPnl, params.minSideDelta, params.minBalance, params.minGap, params.maxStep)
+        const results = findBestCombo(chain, spot, params.maxCost, params.templateMove, params.minPnl10, params.minPnl, params.minPnlHalf, params.minSideDelta, params.minBalance, params.minGap, params.minSpotGap, params.maxStep)
         const pos = results[0]
         if (pos) {
           const trade: BacktestTrade = {
@@ -161,7 +161,7 @@ function computeMaxDrawdown(equity: number[]): number {
 
 export default function BacktestTab({ sessions }: { sessions: { date: string; id: string }[] }) {
   const [params, setParams] = useState<Params>({
-    maxCost: 50, scanInterval: 5, tpPoints: 1, slPoints: 2, templateMove: 10, minPnl: 0, minSideDelta: 0.5, minBalance: 0.85, minGap: 15, maxStep: 10,
+    maxCost: 50, scanInterval: 5, tpPoints: 1, slPoints: 2, templateMove: 10, minPnl10: 1, minPnl: 0, minPnlHalf: 0.4, minSideDelta: 0.5, minBalance: 0.85, minGap: 15, minSpotGap: 10, maxStep: 10,
   })
   const [mode, setMode] = useState<'range' | 'pick'>('range')
   const [selectedDates, setSelectedDates] = useState<Set<string>>(new Set())
@@ -221,7 +221,9 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
             <ParamInput label="TP (pts)" value={params.tpPoints} onChange={v => updateParam('tpPoints', v)} min={0.5} max={10} step={0.5} />
             <ParamInput label="SL (pts)" value={params.slPoints} onChange={v => updateParam('slPoints', v)} min={0.5} max={10} step={0.5} />
             <ParamInput label="Template (pts)" value={params.templateMove} onChange={v => updateParam('templateMove', v)} min={5} max={20} step={2.5} />
+              <ParamInput label="Min P&L 10 (pts)" value={params.minPnl10} onChange={v => updateParam('minPnl10', v)} min={0} max={5} step={0.1} />
             <ParamInput label="Min P&L (pts)" value={params.minPnl} onChange={v => updateParam('minPnl', v)} min={0} max={5} step={0.1} />
+            <ParamInput label="Min P&L 1/2 (pts)" value={params.minPnlHalf} onChange={v => updateParam('minPnlHalf', v)} min={0} max={5} step={0.1} />
             <ParamInput label="Min Side Delta" value={params.minSideDelta} onChange={v => updateParam('minSideDelta', v)} min={0} max={1} step={0.05} />
             <ParamInput label="Min Balance" value={params.minBalance} onChange={v => updateParam('minBalance', v)} min={0} max={1} step={0.05} />
             <ParamInput label="Min Gap" value={params.minGap} onChange={v => updateParam('minGap', v)} min={0} max={50} step={5} />
@@ -241,7 +243,9 @@ export default function BacktestTab({ sessions }: { sessions: { date: string; id
             </div>
             <div className="flex flex-wrap gap-3 mt-2">
               <ParamInput label="Template (pts)" value={params.templateMove} onChange={v => updateParam('templateMove', v)} min={5} max={20} step={2.5} />
-              <ParamInput label="Min P&L (pts)" value={params.minPnl} onChange={v => updateParam('minPnl', v)} min={0} max={5} step={0.1} />
+            <ParamInput label="Min P&L 10 (pts)" value={params.minPnl10} onChange={v => updateParam('minPnl10', v)} min={0} max={5} step={0.1} />
+            <ParamInput label="Min P&L (pts)" value={params.minPnl} onChange={v => updateParam('minPnl', v)} min={0} max={5} step={0.1} />
+            <ParamInput label="Min P&L 1/2 (pts)" value={params.minPnlHalf} onChange={v => updateParam('minPnlHalf', v)} min={0} max={5} step={0.1} />
             <ParamInput label="Min Side Delta" value={params.minSideDelta} onChange={v => updateParam('minSideDelta', v)} min={0} max={1} step={0.05} />
             <ParamInput label="Min Balance" value={params.minBalance} onChange={v => updateParam('minBalance', v)} min={0} max={1} step={0.05} />
             <ParamInput label="Min Gap" value={params.minGap} onChange={v => updateParam('minGap', v)} min={0} max={50} step={5} />

@@ -16,6 +16,8 @@ export interface ComboResult {
   score: number
   pnlPos: number
   pnlNeg: number
+  pnl5Pos: number
+  pnl5Neg: number
 }
 
 export function evalCombo(
@@ -25,10 +27,13 @@ export function evalCombo(
   spot: number,
   maxCost: number,
   templateMove: number,
+  minPnl10: number,
   minPnl: number,
+  minPnlHalf: number,
   minSideDelta: number,
   minBalance: number,
   minGap: number,
+  minSpotGap: number,
   maxStep: number,
 ): ComboResult | null {
   const ask = (r: OptionRow) => surfacePrice(chain, r.strike, r.type, 0, true)
@@ -71,17 +76,26 @@ export function evalCombo(
         const gap = itm.type === 'call' ? avgOtm - itm.strike : itm.strike - avgOtm
         if (gap < minGap) return
       }
+      if (minSpotGap > 0) {
+        const nearestOtmStrike = otms[itm.type === 'call' ? n - 1 : 0].strike
+        const spotGap = itm.type === 'call' ? spot - nearestOtmStrike : nearestOtmStrike - spot
+        if (spotGap < minSpotGap) return
+      }
       const pnLat = (move: number) => legs.reduce(
         (s, l) => s + l.quantity * surfacePrice(chain, l.strike, l.type, move, false), 0
       )
       const pnlPos = pnLat(templateMove) - cost
       const pnlNeg = pnLat(-templateMove) - cost
-      if (pnlPos < minPnl || pnlNeg < minPnl) return
+      const halfMove = templateMove / 2
+      const pnl5Pos = pnLat(halfMove) - cost
+      const pnl5Neg = pnLat(-halfMove) - cost
+      if (Math.max(pnlPos, pnlNeg) < minPnl10 || Math.min(pnlPos, pnlNeg) < minPnl) return
+      if (pnl5Pos < minPnlHalf || pnl5Neg < minPnlHalf) return
       if (maxStep > 0 && templateMove / Math.min(pnlPos, pnlNeg) > maxStep) return
-      const sc = Math.min(pnlPos, pnlNeg)
+      const sc = Math.min(pnlPos, pnlNeg, pnl5Pos, pnl5Neg)
       if (sc > bestScore || (sc === bestScore && cost < (best?.cost ?? Infinity))) {
         bestScore = sc
-        best = { legs, cost, score: sc, pnlPos, pnlNeg }
+        best = { legs, cost, score: sc, pnlPos, pnlNeg, pnl5Pos, pnl5Neg }
       }
       return
     }
@@ -100,10 +114,13 @@ export function findBestCombo(
   spot: number,
   maxCost: number,
   templateMove: number,
+  minPnl10: number,
   minPnl: number,
+  minPnlHalf: number,
   minSideDelta: number,
   minBalance: number,
   minGap: number,
+  minSpotGap: number,
   maxStep: number,
   maxResults: number = 1,
 ): ComboResult[] {
@@ -118,7 +135,7 @@ export function findBestCombo(
     const otms = puts.filter(r => r.strike > itm.strike && r.strike < spot)
     if (otms.length < 2) continue
     for (const g of getConsecutiveGroups(otms, 2)) {
-      const r = evalCombo(itm, g, chain, spot, maxCost, templateMove, minPnl, minSideDelta, minBalance, minGap, maxStep)
+      const r = evalCombo(itm, g, chain, spot, maxCost, templateMove, minPnl10, minPnl, minPnlHalf, minSideDelta, minBalance, minGap, minSpotGap, maxStep)
       if (r) results.push(r)
     }
   }
@@ -126,7 +143,7 @@ export function findBestCombo(
     const otms = calls.filter(r => r.strike < itm.strike && r.strike > spot)
     if (otms.length < 2) continue
     for (const g of getConsecutiveGroups(otms, 2)) {
-      const r = evalCombo(itm, g, chain, spot, maxCost, templateMove, minPnl, minSideDelta, minBalance, minGap, maxStep)
+      const r = evalCombo(itm, g, chain, spot, maxCost, templateMove, minPnl10, minPnl, minPnlHalf, minSideDelta, minBalance, minGap, minSpotGap, maxStep)
       if (r) results.push(r)
     }
   }

@@ -57,20 +57,23 @@ function resultToPosition(r: { legs: ComboLeg[]; cost: number; score: number }, 
 
 export default function TradeScanner({ date, chain, spotPrice }: Props) {
   const [maxResults, setMaxResults] = useState(20)
-  const [maxCostFilter, setMaxCostFilter] = useState(20)
+  const [maxCostFilter, setMaxCostFilter] = useState(200)
   const [templateMove, setTemplateMove] = useState(10)
   const [minPnl, setMinPnl] = useState(0)
+  const [minPnl10, setMinPnl10] = useState(1)
+  const [minPnlHalf, setMinPnlHalf] = useState(0.4)
   const [minSideDelta, setMinSideDelta] = useState(0.5)
   const [minBalance, setMinBalance] = useState(0.85)
   const [minGap, setMinGap] = useState(15)
+  const [minSpotGap, setMinSpotGap] = useState(10)
   const [maxStep, setMaxStep] = useState(10)
   const [selectedPos, setSelectedPos] = useState<string | null>(null)
 
   const positions = useMemo(() => {
     if (!spotPrice || chain.length === 0) return []
-    const results = findBestCombo(chain, spotPrice, maxCostFilter, templateMove, minPnl, minSideDelta, minBalance, minGap, maxStep, maxResults * 5)
+    const results = findBestCombo(chain, spotPrice, maxCostFilter, templateMove, minPnl10, minPnl, minPnlHalf, minSideDelta, minBalance, minGap, minSpotGap, maxStep, maxResults * 5)
     return results.map(r => resultToPosition(r, chain)).slice(0, maxResults)
-  }, [chain, spotPrice, maxResults, maxCostFilter, templateMove, minPnl, minSideDelta, minBalance, minGap, maxStep])
+  }, [chain, spotPrice, maxResults, maxCostFilter, templateMove, minPnl10, minPnl, minPnlHalf, minSideDelta, minBalance, minGap, minSpotGap, maxStep])
 
   const selected = positions.find(p => p.id === selectedPos)
 
@@ -105,6 +108,14 @@ export default function TradeScanner({ date, chain, spotPrice }: Props) {
           <div className="flex items-center gap-2">
             <label className="text-xs text-ztextdim">Min P&L (pts):</label>
             <input type="number" value={minPnl} onChange={e => setMinPnl(Number(e.target.value))} onFocus={e => e.target.select()} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.1} min={0} max={5} />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-ztextdim">Min P&L 10 (pts):</label>
+            <input type="number" value={minPnl10} onChange={e => setMinPnl10(Number(e.target.value))} onFocus={e => e.target.select()} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.1} min={0} max={5} />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-ztextdim">Min P&L 1/2 (pts):</label>
+            <input type="number" value={minPnlHalf} onChange={e => setMinPnlHalf(Number(e.target.value))} onFocus={e => e.target.select()} className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-16" step={0.1} min={0} max={5} />
           </div>
           <div className="flex items-center gap-2">
             <label className="text-xs text-ztextdim">Min Side Delta:</label>

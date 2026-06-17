@@ -14,7 +14,7 @@ export default function ChainTab({ date }: Props) {
   const [sortBy, setSortBy] = useState<'strike' | 'volume'>('strike')
 
   useEffect(() => {
-    if (!date) return
+    if (!date || date === '__live__') return
     setLoading(true)
     fetchChain(date)
       .then(res => {

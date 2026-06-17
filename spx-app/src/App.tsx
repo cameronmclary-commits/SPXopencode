@@ -9,11 +9,14 @@ import Monitoring from './components/Monitoring'
 import HistoricalTab from './components/HistoricalTab'
 import BacktestTab from './components/BacktestTab'
 import LiveTab from './components/LiveTab'
+import LiveAnalysis from './components/LiveAnalysis'
+import LivePlayback from './components/LivePlayback'
 import PreMarket from './components/PreMarket'
 import PlaybackTab from './components/PlaybackTab'
+import SurfaceTab from './components/SurfaceTab'
 import ErrorBoundary from './components/shared/ErrorBoundary'
 
-type Tab = 'overview' | 'chain' | 'scanner' | 'lab' | 'monitoring' | 'historical' | 'premarket' | 'backtest' | 'live' | 'playback'
+type Tab = 'overview' | 'chain' | 'scanner' | 'lab' | 'monitoring' | 'historical' | 'premarket' | 'backtest' | 'live' | 'liveanalysis' | 'liveplayback' | 'playback' | 'surface'
 
 const tabs: { id: Tab; label: string }[] = [
   { id: 'overview', label: 'Overview' },
@@ -22,19 +25,28 @@ const tabs: { id: Tab; label: string }[] = [
   { id: 'lab', label: 'Trade Lab' },
   { id: 'backtest', label: 'Backtest' },
   { id: 'playback', label: 'Playback' },
+  { id: 'surface', label: 'Surface' },
+  { id: 'liveanalysis', label: 'Analysis' },
+  { id: 'liveplayback', label: 'Replay' },
   { id: 'live', label: 'Live' },
   { id: 'monitoring', label: 'Monitor' },
   { id: 'historical', label: 'Historical' },
   { id: 'premarket', label: 'Pre-Market' },
 ]
 
+const LIVE_MODE = '__live__'
+
+const isLiveMode = (d: string) => d === LIVE_MODE
+
 export default function App() {
   const [tab, setTab] = useState<Tab>('overview')
   const [sessions, setSessions] = useState<SessionInfo[]>([])
-  const [selectedDate, setSelectedDate] = useState('')
+  const [selectedDate, setSelectedDate] = useState(LIVE_MODE)
   const [sessionData, setSessionData] = useState<SessionData | null>(null)
   const [loading, setLoading] = useState(false)
   const [apiStatus, setApiStatus] = useState<'checking' | 'online' | 'offline'>('checking')
+
+  const dataSource = isLiveMode(selectedDate) ? 'live' as const : 'historical' as const
 
   useEffect(() => {
     checkHealth()
@@ -44,14 +56,12 @@ export default function App() {
 
   useEffect(() => {
     fetchSessions()
-      .then(s => {
-        setSessions(s)
-        if (s.length > 0 && !selectedDate) setSelectedDate(s[0].date)
-      })
+      .then(setSessions)
       .catch(() => setApiStatus('offline'))
   }, [])
 
   const loadSession = useCallback(async (date: string) => {
+    if (isLiveMode(date)) { setSessionData(null); return }
     setLoading(true)
     try {
       const data = await fetchSession(date)
@@ -111,15 +121,27 @@ export default function App() {
           {sessions.length > 0 && (
             <div className="mb-4 flex items-center gap-2 animate-fade-in">
               <label className="text-xs text-ztextdim tracking-wide uppercase">Session:</label>
-              <select
-                value={selectedDate}
-                onChange={e => setSelectedDate(e.target.value)}
-                className="bg-zgray border border-zborder rounded px-2 py-1 text-sm text-ztext"
-              >
-                {sessions.map(s => (
-                  <option key={s.date} value={s.date}>{s.date}</option>
-                ))}
-              </select>
+              <div className="flex items-center gap-2">
+                <select
+                  value={selectedDate}
+                  onChange={e => setSelectedDate(e.target.value)}
+                  className="bg-zgray border border-zborder rounded px-2 py-1 text-sm text-ztext"
+                >
+                  <option value={LIVE_MODE}>Today (Live)</option>
+                  <optgroup label="── Historical ──">
+                    {sessions.map(s => (
+                      <option key={s.date} value={s.date}>{s.date}</option>
+                    ))}
+                  </optgroup>
+                </select>
+                <span className={`text-xs font-semibold tracking-wider uppercase px-2 py-0.5 rounded ${
+                  dataSource === 'live'
+                    ? 'text-zgreen bg-zgreen/10 border border-zgreen/30'
+                    : 'text-zamber bg-zamber/10 border border-zamber/30'
+                }`}>
+                  {dataSource === 'live' ? 'Live' : 'Historical'}
+                </span>
+              </div>
               {loading && <span className="text-xs text-ztextdim animate-pulse">loading...</span>}
             </div>
           )}
@@ -131,9 +153,12 @@ export default function App() {
           {tab === 'backtest' && <BacktestTab sessions={sessions} />}
           {tab === 'playback' && <PlaybackTab sessions={sessions} />}
           {tab === 'live' && <LiveTab sessions={sessions} />}
+          {tab === 'liveanalysis' && <LiveAnalysis />}
+          {tab === 'liveplayback' && <LivePlayback />}
           {tab === 'monitoring' && <Monitoring />}
           {tab === 'historical' && <HistoricalTab sessions={sessions} />}
           {tab === 'premarket' && <PreMarket />}
+          {tab === 'surface' && <SurfaceTab sessions={sessions} />}
         </ErrorBoundary>
       </main>
     </div>

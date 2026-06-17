@@ -2,11 +2,15 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { loadMinuteSnapshots, getOpraDates } from './minute-loader.js';
+import { execSync } from 'child_process';
+import process from 'process';
+import fs from 'fs';
 import * as ibkr from './ibkr-client.js';
+import { fetchLiveSession, listSessions, loadSession } from './yahoo-provider.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_DIR = path.resolve(__dirname, '..', 'spx-app', 'dist');
+const CACHE_DIR = path.resolve(__dirname, '..', 'snapshot-cache');
 
 const app = express();
 const PORT = process.env.PORT || 3080;
@@ -14,29 +18,56 @@ const PORT = process.env.PORT || 3080;
 app.use(cors());
 app.use(express.static(STATIC_DIR));
 
-const opraDates = getOpraDates();
-const sessionList = opraDates.map(d => ({ date: d, id: d.replace(/-/g, ''), sessionDate: d }));
-console.log(`Loaded ${sessionList.length} OPRA dates`);
+function loadSnapshots(dateStr) {
+  const fileDate = dateStr.slice(2).replace(/-/g, '');
+  const cachePath = path.join(CACHE_DIR, `${fileDate}.json`);
+  if (fs.existsSync(cachePath)) {
+    return JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+  }
+  try {
+    const script = path.resolve(__dirname, 'fetch_spxw_snapshots.py');
+    const out = execSync(`python3 "${script}" "${dateStr}"`, {
+      encoding: 'utf-8', timeout: 120000,
+      env: { ...process.env, DATABENTO_API_KEY: process.env.DATABENTO_API_KEY || '' },
+    });
+    return JSON.parse(out);
+  } catch (e) {
+    console.error(`Databento fetch failed for ${dateStr}:`, e.message);
+    return null;
+  }
+}
+
+function listCachedDates() {
+  try {
+    if (!fs.existsSync(CACHE_DIR)) return [];
+    return fs.readdirSync(CACHE_DIR)
+      .filter(f => f.endsWith('.json'))
+      .map(f => {
+        const raw = f.replace('.json', '');
+        return `20${raw.slice(0, 2)}-${raw.slice(2, 4)}-${raw.slice(4, 6)}`;
+      })
+      .sort();
+  } catch { return []; }
+}
+
+const sessionList = listCachedDates().map(d => ({ date: d, id: d.replace(/-/g, ''), sessionDate: d }));
 
 app.get('/api/sessions', (req, res) => {
-  const list = sessionList.map(s => ({
-    id: s.id,
-    date: s.date,
+  const dates = listCachedDates().map(d => ({
+    id: d.replace(/-/g, ''),
+    date: d,
     hasSnapshots: true,
   }));
-  res.json({ sessions: list, total: list.length });
+  res.json({ sessions: dates, total: dates.length });
 });
 
 app.get('/api/sessions/:date', async (req, res) => {
   try {
     const { date } = req.params;
-    if (!sessionList.some(s => s.date === date)) {
-      return res.status(404).json({ error: 'Date not found' });
-    }
 
-    const minutes = await loadMinuteSnapshots(date);
+    const minutes = loadSnapshots(date);
     if (!minutes || minutes.length === 0) {
-      return res.status(404).json({ error: 'No OPRA data for ' + date });
+      return res.status(404).json({ error: 'No data for ' + date });
     }
 
     const first = minutes[0];
@@ -72,9 +103,9 @@ app.get('/api/sessions/:date', async (req, res) => {
 app.get('/api/chain/:date', async (req, res) => {
   try {
     const { date } = req.params;
-    const minutes = await loadMinuteSnapshots(date);
+    const minutes = loadSnapshots(date);
     if (!minutes || minutes.length === 0) {
-      return res.status(404).json({ error: 'No OPRA data for ' + date });
+      return res.status(404).json({ error: 'No data for ' + date });
     }
     const first = minutes[0];
     res.json({ date, spotPrice: first.spot, chainSize: first.chain.length, chain: first.chain });
@@ -86,9 +117,9 @@ app.get('/api/chain/:date', async (req, res) => {
 app.get('/api/sessions/:date/snapshots', async (req, res) => {
   try {
     const { date } = req.params;
-    const minutes = await loadMinuteSnapshots(date);
+    const minutes = loadSnapshots(date);
     if (!minutes || minutes.length === 0) {
-      return res.status(404).json({ error: 'No OPRA data for ' + date });
+      return res.status(404).json({ error: 'No data for ' + date });
     }
 
     const snapshots = minutes.filter(m => m.spot > 0).map(m => {
@@ -176,11 +207,37 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', datesAvailable: sessionList.length });
 });
 
+app.get('/api/live/yahoo', async (req, res) => {
+  try {
+    const data = await fetchLiveSession();
+    res.json(data);
+  } catch (e) {
+    res.status(503).json({ error: e.message });
+  }
+});
+
+app.get('/api/live/sessions', (req, res) => {
+  try {
+    res.json(listSessions());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/live/session/:date', (req, res) => {
+  try {
+    const data = loadSession(req.params.date);
+    if (!data) return res.status(404).json({ error: 'Session not found' });
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.use((req, res) => {
   res.sendFile(path.join(STATIC_DIR, 'index.html'));
 });
 
 app.listen(PORT, () => {
   console.log('Options Data API running on http://localhost:' + PORT);
-  console.log('Available dates: ' + sessionList.length);
 });

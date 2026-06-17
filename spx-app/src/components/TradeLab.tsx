@@ -24,7 +24,7 @@ export default function TradeLab({ selectedDate }: Props) {
   const [tick, setTick] = useState(0)
   const [speed, setSpeed] = useState(1)
   const [params, setParams] = useState({
-    maxCost: 50, templateMove: 10, minPnl: 0, minSideDelta: 0.5, minBalance: 0.85, minGap: 15, maxStep: 10,
+    maxCost: 50, templateMove: 10, minPnl10: 1, minPnl: 0, minPnlHalf: 0.4, minSideDelta: 0.5, minBalance: 0.85, minGap: 15, minSpotGap: 10, maxStep: 10,
     tpPoints: 1, slPoints: 2, scanInterval: 5,
   })
   const [trades, setTrades] = useState<ForwardTrade[]>([])
@@ -70,7 +70,7 @@ export default function TradeLab({ selectedDate }: Props) {
     if (openTradeRef.current) return
     const tickMin = timeToMinutes(currentTime)
     if (tickMin < nextScanRef.current) return
-    const results = findBestCombo(currentChain, currentPrice, params.maxCost, params.templateMove, params.minPnl, params.minSideDelta, params.minBalance, params.minGap, params.maxStep)
+    const results = findBestCombo(currentChain, currentPrice, params.maxCost, params.templateMove, params.minPnl10, params.minPnl, params.minPnlHalf, params.minSideDelta, params.minBalance, params.minGap, params.minSpotGap, params.maxStep)
     if (!results.length) return
     const pos = results[0]
     const trade: ForwardTrade = {
@@ -171,7 +171,9 @@ export default function TradeLab({ selectedDate }: Props) {
           <div className="grid grid-cols-2 gap-3">
             <ParamInput label="Max Cost (pts)" value={params.maxCost} onChange={v => setParams(p => ({ ...p, maxCost: v }))} min={5} max={200} step={5} />
             <ParamInput label="Template (pts)" value={params.templateMove} onChange={v => setParams(p => ({ ...p, templateMove: v }))} min={5} max={20} step={2.5} />
+            <ParamInput label="Min P&L 10 (pts)" value={params.minPnl10} onChange={v => setParams(p => ({ ...p, minPnl10: v }))} min={0} max={5} step={0.1} />
             <ParamInput label="Min P&L (pts)" value={params.minPnl} onChange={v => setParams(p => ({ ...p, minPnl: v }))} min={0} max={5} step={0.1} />
+            <ParamInput label="Min P&L 1/2 (pts)" value={params.minPnlHalf} onChange={v => setParams(p => ({ ...p, minPnlHalf: v }))} min={0} max={5} step={0.1} />
             <ParamInput label="Min Side Delta" value={params.minSideDelta} onChange={v => setParams(p => ({ ...p, minSideDelta: v }))} min={0} max={1} step={0.05} />
             <ParamInput label="Min Balance" value={params.minBalance} onChange={v => setParams(p => ({ ...p, minBalance: v }))} min={0} max={1} step={0.05} />
             <ParamInput label="Min Gap" value={params.minGap} onChange={v => setParams(p => ({ ...p, minGap: v }))} min={0} max={50} step={5} />

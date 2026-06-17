@@ -25,8 +25,8 @@ interface OpenTrade {
   entryTp: number; entrySl: number
 }
 
-function findSuggestions(chain: OptionRow[], spot: number, maxCost: number, templateMove: number, minPnl: number, minSideDelta: number, minBalance: number, minGap: number, maxStep: number): SuggestedTrade[] {
-  const results = findBestCombo(chain, spot, maxCost, templateMove, minPnl, minSideDelta, minBalance, minGap, maxStep, 10)
+function findSuggestions(chain: OptionRow[], spot: number, maxCost: number, templateMove: number, minPnl10: number, minPnl: number, minPnlHalf: number, minSideDelta: number, minBalance: number, minGap: number, minSpotGap: number, maxStep: number): SuggestedTrade[] {
+  const results = findBestCombo(chain, spot, maxCost, templateMove, minPnl10, minPnl, minPnlHalf, minSideDelta, minBalance, minGap, minSpotGap, maxStep, 10)
   return results.slice(0, 3).map((r, i) => ({
     id: `sug_${i}_${Date.now()}`,
     legs: r.legs,
@@ -82,9 +82,12 @@ export default function LiveTab({ sessions }: { sessions?: SessionInfo[] }) {
   const [sessionEnd, setSessionEnd] = useState('16:00')
   const [templateMove, setTemplateMove] = useState(10)
   const [minPnl, setMinPnl] = useState(0)
+  const [minPnl10, setMinPnl10] = useState(1)
+  const [minPnlHalf, setMinPnlHalf] = useState(0.4)
   const [minSideDelta, setMinSideDelta] = useState(0.5)
   const [minBalance, setMinBalance] = useState(0.85)
   const [minGap, setMinGap] = useState(15)
+  const [minSpotGap, setMinSpotGap] = useState(10)
   const [maxStep, setMaxStep] = useState(10)
   const [maxCost, setMaxCost] = useState(20)
   const [tpPoints, setTpPoints] = useState(3)
@@ -189,9 +192,9 @@ export default function LiveTab({ sessions }: { sessions?: SessionInfo[] }) {
 
   useEffect(() => {
     if (chain.length === 0 || spot === 0) return
-    const all = findSuggestions(chain, spot, maxCost, templateMove, minPnl, minSideDelta, minBalance, minGap, maxStep)
+    const all = findSuggestions(chain, spot, maxCost, templateMove, minPnl10, minPnl, minPnlHalf, minSideDelta, minBalance, minGap, minSpotGap, maxStep)
     setSuggestions(all.filter(s => !rejectedIds.has(s.id)))
-  }, [chain, spot, maxCost, templateMove, minPnl, minSideDelta, minBalance, minGap, maxStep, rejectedIds])
+  }, [chain, spot, maxCost, templateMove, minPnl10, minPnl, minPnlHalf, minSideDelta, minBalance, minGap, minSpotGap, maxStep, rejectedIds])
 
   useEffect(() => {
     if (openTrades.length === 0 || chain.length === 0) return
@@ -474,7 +477,9 @@ export default function LiveTab({ sessions }: { sessions?: SessionInfo[] }) {
         <div className="flex flex-wrap gap-4 mt-3 pt-3 border-t border-zborder">
           <ParamInput label="Max Cost" value={maxCost} onChange={setMaxCost} min={5} max={200} step={5} />
           <ParamInput label="Template" value={templateMove} onChange={setTemplateMove} min={5} max={20} step={2.5} />
+          <ParamInput label="Min P&L 10" value={minPnl10} onChange={setMinPnl10} min={0} max={5} step={0.1} />
           <ParamInput label="Min P&L" value={minPnl} onChange={setMinPnl} min={0} max={5} step={0.1} />
+          <ParamInput label="Min P&L 1/2" value={minPnlHalf} onChange={setMinPnlHalf} min={0} max={5} step={0.1} />
           <ParamInput label="Min Side Delta" value={minSideDelta} onChange={setMinSideDelta} min={0} max={1} step={0.05} />
           <ParamInput label="Min Balance" value={minBalance} onChange={setMinBalance} min={0} max={1} step={0.05} />
           <ParamInput label="Min Gap" value={minGap} onChange={setMinGap} min={0} max={50} step={5} />

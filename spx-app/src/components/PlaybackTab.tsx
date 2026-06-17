@@ -11,10 +11,13 @@ interface Props {
 interface ScanParams {
   maxCost: number
   templateMove: number
+  minPnl10: number
   minPnl: number
+  minPnlHalf: number
   minSideDelta: number
   minBalance: number
   minGap: number
+  minSpotGap: number
   maxStep: number
 }
 
@@ -56,12 +59,15 @@ export default function PlaybackTab({ sessions }: Props) {
   const [snapshots, setSnapshots] = useState<ChainSnapshot[]>([])
   const [loading, setLoading] = useState(false)
   const [params, setParams] = useState<ScanParams>({
-    maxCost: 50,
+    maxCost: 200,
     templateMove: 10,
+    minPnl10: 1,
     minPnl: 0,
+    minPnlHalf: 0,
     minSideDelta: 0.5,
-    minBalance: 0.85,
-    minGap: 15,
+    minBalance: 0.7,
+    minGap: 5,
+    minSpotGap: 3,
     maxStep: 10,
   })
   const [suggestions, setSuggestions] = useState<SuggestedCombo[]>([])
@@ -88,7 +94,7 @@ export default function PlaybackTab({ sessions }: Props) {
     const snap = pb.current
     if (!snap) { setSuggestions([]); return }
     const { spot, chain } = snap
-    const results = findBestCombo(chain, spot, params.maxCost, params.templateMove, params.minPnl, params.minSideDelta, params.minBalance, params.minGap, params.maxStep, 3)
+    const results = findBestCombo(chain, spot, params.maxCost, params.templateMove, params.minPnl10, params.minPnl, params.minPnlHalf, params.minSideDelta, params.minBalance, params.minGap, params.minSpotGap, params.maxStep, 3)
     setSuggestions(results.map((r, i) => {
       const itmType = r.legs[0].type
       return {
@@ -330,8 +336,20 @@ export default function PlaybackTab({ sessions }: Props) {
                         className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-full" step={2.5} />
                     </div>
                     <div>
+                      <label className="text-[10px] text-ztextdim tracking-wide uppercase">Min P&L 10</label>
+                      <input type="number" value={params.minPnl10} onChange={e => updateParam('minPnl10', Number(e.target.value))}
+                        onFocus={e => e.target.select()}
+                        className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-full" step={0.1} />
+                    </div>
+                    <div>
                       <label className="text-[10px] text-ztextdim tracking-wide uppercase">Min P&L</label>
                       <input type="number" value={params.minPnl} onChange={e => updateParam('minPnl', Number(e.target.value))}
+                        onFocus={e => e.target.select()}
+                        className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-full" step={0.1} />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-ztextdim tracking-wide uppercase">Min P&L 1/2</label>
+                      <input type="number" value={params.minPnlHalf} onChange={e => updateParam('minPnlHalf', Number(e.target.value))}
                         onFocus={e => e.target.select()}
                         className="bg-zgray border border-zborder rounded px-2 py-1 text-xs text-ztext w-full" step={0.1} />
                     </div>
