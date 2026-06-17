@@ -53,26 +53,26 @@ function buildLegs(center, wing) {
 
 // Fill price for one leg's transaction. Whether it's a buy or a sell depends on
 // BOTH the leg's sign (long/short) AND whether we're opening or closing:
-//   opening a long leg  -> BUY  -> ask + slippage
-//   opening a short leg -> SELL -> bid - slippage
-//   closing a long leg  -> SELL -> bid - slippage
-//   closing a short leg -> BUY  -> ask + slippage
-function legFillPrice(chain, leg, slippage, isOpening) {
+//   opening a long leg  -> BUY  -> ask
+//   opening a short leg -> SELL -> bid
+//   closing a long leg  -> SELL -> bid
+//   closing a short leg -> BUY  -> ask
+function legFillPrice(chain, leg, isOpening) {
   const isBuy = isOpening ? leg.quantity > 0 : leg.quantity < 0
   if (isBuy) {
-    return surfacePrice(chain, leg.strike, leg.type, true) + slippage
+    return surfacePrice(chain, leg.strike, leg.type, true)   // ask
   }
-  return Math.max(0.01, surfacePrice(chain, leg.strike, leg.type, false) - slippage)
+  return Math.max(0.01, surfacePrice(chain, leg.strike, leg.type, false)) // bid
 }
 
 // cost = sum(qty * fillPrice) at OPEN -> negative cost == credit received
-function legsCost(chain, legs, slippage) {
-  return legs.reduce((s, l) => s + l.quantity * legFillPrice(chain, l, slippage, true), 0)
+function legsCost(chain, legs) {
+  return legs.reduce((s, l) => s + l.quantity * legFillPrice(chain, l, true), 0)
 }
 
 // value = sum(qty * fillPrice) if CLOSED right now
-function legsValue(chain, legs, slippage) {
-  return legs.reduce((s, l) => s + l.quantity * legFillPrice(chain, l, slippage, false), 0)
+function legsValue(chain, legs) {
+  return legs.reduce((s, l) => s + l.quantity * legFillPrice(chain, l, false), 0)
 }
 
 // ---- Grid stepping logic ----
@@ -107,8 +107,7 @@ async function run() {
     tradeStartTime: '09:31',
     tradeEndTime: '15:45',
     closeAtPctOfCredit: 0.10, // close a position once its cost-to-close drops to this fraction of the credit received
-    dollarMultiplier: 100,    // SPX option contract multiplier
-    slippage: 0.05            // per-contract slippage allowance added/subtracted on every fill
+    dollarMultiplier: 100     // SPX option contract multiplier
   }
 
   let cumPnlPts = 0
@@ -137,7 +136,7 @@ async function run() {
     let dayPnlPts = 0, dayTrades = 0, dayWins = 0, dayLosses = 0
 
     function closePosition(pos, chain, tickMin, time, reason) {
-      const exitVal = legsValue(chain, pos.legs, params.slippage) // direction-aware fill value of the signed position
+      const exitVal = legsValue(chain, pos.legs) // direction-aware fill value of the signed position
       const pnlPts = exitVal - pos.cost // exit fill value minus entry fill cost
       cumPnlPts += pnlPts
       dayPnlPts += pnlPts
@@ -164,7 +163,7 @@ async function run() {
         anchor = round5(spot)
         tradedLevels.add(anchor)
         const legs = buildLegs(anchor, params.wing)
-        const cost = legsCost(chain, legs, params.slippage)
+        const cost = legsCost(chain, legs)
         const credit = -cost
         openPositions.push({ center: anchor, legs, cost, credit, entryTick: tick, entryTime: pricePath[tick].time, entrySpot: spot })
         console.log(`${date} ${pricePath[tick].time} OPEN center=${anchor} spot=${spot} credit=${credit.toFixed(2)}`)
@@ -173,7 +172,7 @@ async function run() {
         if (level !== null) {
           tradedLevels.add(level)
           const legs = buildLegs(level, params.wing)
-          const cost = legsCost(chain, legs, params.slippage)
+          const cost = legsCost(chain, legs)
           const credit = -cost
           openPositions.push({ center: level, legs, cost, credit, entryTick: tick, entryTime: pricePath[tick].time, entrySpot: spot })
           console.log(`${date} ${pricePath[tick].time} OPEN center=${level} spot=${spot} credit=${credit.toFixed(2)}`)
@@ -184,7 +183,7 @@ async function run() {
       for (let i = openPositions.length - 1; i >= 0; i--) {
         const pos = openPositions[i]
         if (tick <= pos.entryTick) continue
-        const costToClose = -legsValue(chain, pos.legs, params.slippage)
+        const costToClose = -legsValue(chain, pos.legs)
         // costToClose is what it would cost (direction-aware fills) to flatten the position right now; lower is better for us
         if (costToClose <= pos.credit * params.closeAtPctOfCredit) {
           closePosition(pos, chain, tickMin, pricePath[tick].time, 'TP')
