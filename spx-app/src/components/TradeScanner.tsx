@@ -65,7 +65,7 @@ export default function TradeScanner({ date, chain, spotPrice }: Props) {
   const [minSideDelta, setMinSideDelta] = useState(0.5)
   const [minBalance, setMinBalance] = useState(0.85)
   const [minGap, setMinGap] = useState(15)
-  const [minSpotGap, setMinSpotGap] = useState(10)
+  const [minSpotGap] = useState(10)
   const [maxStep, setMaxStep] = useState(10)
   const [selectedPos, setSelectedPos] = useState<string | null>(null)
 

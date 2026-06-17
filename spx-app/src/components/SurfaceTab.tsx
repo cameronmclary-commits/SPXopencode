@@ -199,7 +199,7 @@ export default function SurfaceTab({ sessions }: Props) {
                     </tr>
                     <tr className="sticky top-[22px] bg-zdark/95 z-10">
                       <th className="text-right px-1 py-0.5 text-[8px] text-ztextdim/40 sticky left-0 bg-zdark z-20">Spot</th>
-                      {surfaceData.spots.map((sp, i) => (
+                      {surfaceData.spots?.map((sp, i) => (
                         <th key={i} className={`px-1 py-0.5 text-center text-[8px] ${i === snapIdx ? 'text-zcyan' : 'text-ztextdim/40'}`}>
                           {sp.toFixed(0)}
                         </th>
@@ -216,7 +216,7 @@ export default function SurfaceTab({ sessions }: Props) {
                             {strike}
                           </td>
                           {row.map((v, ti) => {
-                            const isAtm = Math.abs(strike - surfaceData.spots[ti]) < 2.5
+                            const isAtm = Math.abs(strike - (surfaceData.spots?.[ti] ?? 0)) < 2.5
                             return (
                               <td key={ti}
                                 className={`px-1 py-0.5 text-center ${ti === snapIdx ? 'ring-1 ring-zcyan' : ''} ${isAtm ? 'ring-1 ring-white/40' : ''}`}

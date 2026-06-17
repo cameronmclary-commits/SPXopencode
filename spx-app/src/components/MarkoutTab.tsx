@@ -239,7 +239,7 @@ export default function MarkoutTab({ sessions }: Props) {
                     <YAxis tick={{ fontSize: 10, fill: '#6b7280' }} tickFormatter={v => `$${v.toFixed(1)}`} />
                     <Tooltip
                       contentStyle={{ background: '#1a1a2e', border: '1px solid #2d2d4a', borderRadius: '8px', fontSize: '12px' }}
-                      formatter={(v: number) => [`$${v.toFixed(2)}`, 'Markout'] as [string, string]}
+                      formatter={(v) => [`$${(v as number).toFixed(2)}`, 'Markout'] as [string, string]}
                     />
                     <ReferenceLine y={0} stroke="#4b5563" strokeDasharray="4 4" />
                     {curves.map(c => (
