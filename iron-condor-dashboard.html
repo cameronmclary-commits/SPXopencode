@@ -70,6 +70,12 @@
   .pos { color: var(--amber); }
   .neg { color: var(--rose); }
 
+  .legs-detail.collapsed { display: none; }
+  .legs-detail td { padding: 0 12px 10px; }
+  .legs-table { width: 100%; font-size: 12px; margin-top: 4px; }
+  .legs-table th, .legs-table td { padding: 6px 10px; border-bottom: 1px dashed var(--panel-border); }
+  .legs-table th { color: var(--text-dim); text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
+
   footer { color: var(--text-dim); font-size: 12px; font-family: 'IBM Plex Mono', monospace; line-height: 1.7; }
 </style>
 </head>
@@ -100,6 +106,27 @@
     </div>
     <svg id="gridTape" viewBox="0 0 900 380"></svg>
     <div class="panel-hint">Hover a dot for entry/exit detail. Click a day below to switch tapes.</div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header">
+      <div class="panel-title">Trades</div>
+      <div class="panel-date" id="tradeTableDate">—</div>
+    </div>
+    <table>
+      <thead><tr><th>#</th><th>Entry</th><th>Grid Move</th><th>Center</th><th>Credit</th><th>Exit</th><th>Reason</th><th>P&amp;L</th></tr></thead>
+      <tbody id="tradeTableBody"></tbody>
+    </table>
+    <div class="panel-hint">Click a trade row to expand its 4 legs and their entry/exit fills.</div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header">
+      <div class="panel-title">Intraday P&amp;L</div>
+      <div class="panel-date" id="intradayPnlDate">—</div>
+    </div>
+    <svg id="intradayPnl" viewBox="0 0 900 140"></svg>
+    <div class="panel-hint">Realized + unrealized (mark-to-market) running total for the selected day.</div>
   </div>
 
   <div class="panel">
@@ -172,12 +199,21 @@ function legFillPrice(chain, leg, slippage, isOpening) {
   return Math.max(0.01, surfacePrice(chain, leg.strike, leg.type, false) - slippage)
 }
 
+// Returns each leg with its fill price attached, so callers can both sum a total
+// and show the per-leg breakdown (used for the trade-detail table).
+function legFills(chain, legs, slippage, isOpening) {
+  return legs.map(l => ({ type: l.type, strike: l.strike, quantity: l.quantity, fill: legFillPrice(chain, l, slippage, isOpening) }))
+}
+function sumFills(fills) {
+  return fills.reduce((s, f) => s + f.quantity * f.fill, 0)
+}
+
 function legsCost(chain, legs, slippage) {
-  return legs.reduce((s, l) => s + l.quantity * legFillPrice(chain, l, slippage, true), 0)
+  return sumFills(legFills(chain, legs, slippage, true))
 }
 
 function legsValue(chain, legs, slippage) {
-  return legs.reduce((s, l) => s + l.quantity * legFillPrice(chain, l, slippage, false), 0)
+  return sumFills(legFills(chain, legs, slippage, false))
 }
 
 async function fetchJSON(path) {
@@ -203,15 +239,26 @@ async function backtestDay(date, params) {
   const openPositions = []
   const trades = []
   const ghostEvents = []
+  const intraday = []
   let dayPnlPts = 0
 
-  function closePosition(pos, chain, exitTick, time, reason) {
-    const exitVal = legsValue(chain, pos.legs, params.slippage)
+  function openTrade(level, chain, tick, time, spot) {
+    tradedLevels.add(level)
+    const legs = buildLegs(level, params.wing)
+    const entryFills = legFills(chain, legs, params.slippage, true)
+    const cost = sumFills(entryFills)
+    openPositions.push({ center: level, legs, entryFills, cost, credit: -cost, entryTick: tick, entryTime: time, entrySpot: spot })
+  }
+
+  function closePosition(pos, chain, exitTick, time, spot, reason) {
+    const exitFills = legFills(chain, pos.legs, params.slippage, false)
+    const exitVal = sumFills(exitFills)
     const pnlPts = exitVal - pos.cost
     dayPnlPts += pnlPts
     trades.push({
       center: pos.center, entryTick: pos.entryTick, entryTime: pos.entryTime, entrySpot: pos.entrySpot,
-      exitTick, exitTime: time, credit: pos.credit, pnlPts, reason
+      exitTick, exitTime: time, exitSpot: spot, credit: pos.credit, costToClose: -exitVal, pnlPts, reason,
+      legs: pos.legs.map((l, i) => ({ type: l.type, strike: l.strike, quantity: l.quantity, entryFill: pos.entryFills[i].fill, exitFill: exitFills[i].fill }))
     })
   }
 
@@ -225,10 +272,7 @@ async function backtestDay(date, params) {
 
     if (anchor === null) {
       anchor = round5(spot)
-      tradedLevels.add(anchor)
-      const legs = buildLegs(anchor, params.wing)
-      const cost = legsCost(chain, legs, params.slippage)
-      openPositions.push({ center: anchor, legs, cost, credit: -cost, entryTick: tick, entryTime: pricePath[tick].time, entrySpot: spot })
+      openTrade(anchor, chain, tick, pricePath[tick].time, spot)
     } else if (tickMin <= endMin && prevSpot !== spot) {
       const lo = Math.min(prevSpot, spot), hi = Math.max(prevSpot, spot)
       const firstN = Math.ceil((lo - anchor) / params.wing)
@@ -241,11 +285,7 @@ async function backtestDay(date, params) {
       }
       if (untraded.length) {
         untraded.sort((a, b) => Math.abs(a - spot) - Math.abs(b - spot))
-        const level = untraded[0]
-        tradedLevels.add(level)
-        const legs = buildLegs(level, params.wing)
-        const cost = legsCost(chain, legs, params.slippage)
-        openPositions.push({ center: level, legs, cost, credit: -cost, entryTick: tick, entryTime: pricePath[tick].time, entrySpot: spot })
+        openTrade(untraded[0], chain, tick, pricePath[tick].time, spot)
       }
     }
 
@@ -254,22 +294,28 @@ async function backtestDay(date, params) {
       if (tick <= pos.entryTick) continue
       const costToClose = -legsValue(chain, pos.legs, params.slippage)
       if (costToClose <= pos.credit * params.closeAtPctOfCredit) {
-        closePosition(pos, chain, tick, pricePath[tick].time, 'TP')
+        closePosition(pos, chain, tick, pricePath[tick].time, spot, 'TP')
         openPositions.splice(i, 1)
       } else if (tickMin >= endMin) {
-        closePosition(pos, chain, tick, pricePath[tick].time, 'EOD')
+        closePosition(pos, chain, tick, pricePath[tick].time, spot, 'EOD')
         openPositions.splice(i, 1)
       }
+    }
+
+    if (anchor !== null) {
+      const unrealized = openPositions.reduce((s, pos) => s + (legsValue(chain, pos.legs, params.slippage) - pos.cost), 0)
+      intraday.push({ tick, time: pricePath[tick].time, pnlPts: dayPnlPts + unrealized })
     }
   }
 
   if (openPositions.length) {
     const finalTick = pricePath.length - 1
     const finalChain = (snapshots[finalTick] && snapshots[finalTick].chain) || session.openingChain || []
-    for (const pos of openPositions) closePosition(pos, finalChain, finalTick, pricePath[finalTick].time, 'EOS')
+    const finalSpot = pricePath[finalTick].price
+    for (const pos of openPositions) closePosition(pos, finalChain, finalTick, pricePath[finalTick].time, finalSpot, 'EOS')
   }
 
-  return { date, pricePath, anchor, trades, ghostEvents, dayPnlPts }
+  return { date, pricePath, anchor, trades, ghostEvents, intraday, dayPnlPts }
 }
 
 // ---------- rendering ----------
@@ -347,6 +393,67 @@ function renderGridTape(day) {
   svg.innerHTML = `${gridLines}<polyline points="${pathPoints}" class="price-line" />${ghosts}${markers}`
 }
 
+function renderIntradayPnl(day) {
+  const svg = document.getElementById('intradayPnl')
+  const W = 900, H = 140, padL = 50, padR = 16, padT = 14, padB = 24
+  const innerW = W - padL - padR, innerH = H - padT - padB
+  const denom = Math.max(1, day.pricePath.length - 1)
+  const xFor = i => padL + (i / denom) * innerW
+  const pts = day.intraday
+  if (!pts.length) { svg.innerHTML = ''; return }
+  const maxAbs = Math.max(1, ...pts.map(p => Math.abs(p.pnlPts)))
+  const yFor = v => padT + innerH / 2 - (v / maxAbs) * (innerH / 2 - 6)
+  const zeroY = yFor(0)
+  const line = pts.map(p => `${xFor(p.tick)},${yFor(p.pnlPts)}`).join(' ')
+  svg.innerHTML =
+    `<line x1="${padL}" y1="${zeroY}" x2="${W - padR}" y2="${zeroY}" class="zero-line" />` +
+    `<polyline points="${line}" class="equity-line" />` +
+    `<text x="${padL - 8}" y="${zeroY + 3}" class="grid-label" text-anchor="end">0</text>`
+}
+
+function gridMoveLabel(trade, prevTrade) {
+  if (!prevTrade) return 'anchor'
+  const steps = Math.round((trade.center - prevTrade.center) / PARAMS.wing)
+  const skipped = Math.abs(steps) - 1
+  const arrow = steps > 0 ? '↑' : steps < 0 ? '↓' : '–'
+  const label = `${arrow}${Math.abs(steps)} step${Math.abs(steps) !== 1 ? 's' : ''}`
+  return skipped > 0 ? `${label} (skipped ${skipped})` : label
+}
+
+function renderTradeTable(day) {
+  const tbody = document.getElementById('tradeTableBody')
+  tbody.innerHTML = day.trades.map((t, i) => {
+    const prev = i > 0 ? day.trades[i - 1] : null
+    const sign = t.pnlPts >= 0 ? '+' : ''
+    const legsRows = t.legs.map(l => {
+      const legPnl = l.quantity * (l.exitFill - l.entryFill)
+      const side = l.quantity > 0 ? 'BUY' : 'SELL'
+      const lsign = legPnl >= 0 ? '+' : ''
+      return `<tr><td>${side}</td><td>${l.type.toUpperCase()}</td><td>${l.strike}</td><td>${l.entryFill.toFixed(2)}</td><td>${l.exitFill.toFixed(2)}</td><td class="${legPnl >= 0 ? 'pos' : 'neg'}">${lsign}${legPnl.toFixed(2)}</td></tr>`
+    }).join('')
+    return (
+      `<tr class="trade-row" data-idx="${i}">` +
+        `<td>#${i + 1}</td>` +
+        `<td>${t.entryTime} @ ${t.entrySpot.toFixed(2)}</td>` +
+        `<td>${gridMoveLabel(t, prev)}</td>` +
+        `<td>${t.center}</td>` +
+        `<td>${t.credit.toFixed(2)}</td>` +
+        `<td>${t.exitTime} @ ${t.exitSpot.toFixed(2)}</td>` +
+        `<td>${t.reason}</td>` +
+        `<td class="${t.pnlPts >= 0 ? 'pos' : 'neg'}">${sign}${t.pnlPts.toFixed(2)} (${fmtDollars(t.pnlPts * PARAMS.dollarMultiplier)})</td>` +
+      `</tr>` +
+      `<tr class="legs-detail collapsed" data-idx="${i}"><td colspan="8"><table class="legs-table"><thead><tr><th>Side</th><th>Type</th><th>Strike</th><th>Entry Fill</th><th>Exit Fill</th><th>Leg P&amp;L</th></tr></thead><tbody>${legsRows}</tbody></table></td></tr>`
+    )
+  }).join('')
+
+  tbody.querySelectorAll('.trade-row').forEach(row => {
+    row.addEventListener('click', () => {
+      const detail = tbody.querySelector(`.legs-detail[data-idx="${row.dataset.idx}"]`)
+      detail.classList.toggle('collapsed')
+    })
+  })
+}
+
 function renderEquityCurve(allTrades) {
   const svg = document.getElementById('equityCurve')
   const W = 900, H = 120, pad = 16
@@ -378,7 +485,11 @@ function renderDayTable(days) {
 
 function selectDay(day) {
   document.getElementById('gridTapeDate').textContent = day.date
+  document.getElementById('tradeTableDate').textContent = day.date
+  document.getElementById('intradayPnlDate').textContent = day.date
   renderGridTape(day)
+  renderTradeTable(day)
+  renderIntradayPnl(day)
   document.querySelectorAll('#dayTableBody tr').forEach(r => r.classList.toggle('active', r.dataset.date === day.date))
 }
 
