@@ -68,7 +68,7 @@ function comboStillValid(combo: SuggestedCombo, snapshot: ChainSnapshot): boolea
     combo.legs.reduce((s, l) => s + l.quantity * surfacePrice(snapshot.chain, l.strike, l.type, move, false), 0) - cost
   const p10Pos = pnlAt(10)
   const p10Neg = pnlAt(-10)
-  return p10Pos >= 1 && p10Neg >= 1
+  return p10Pos >= 1 && p10Neg >= -1
 }
 
 export default function PlaybackTab({ sessions }: Props) {
