@@ -3,6 +3,7 @@ import type { SessionInfo, ChainSnapshot } from '../types'
 import { usePlayback, type PlaybackSpeed } from '../hooks/usePlayback'
 import { findBestCombo } from '../utils/combos'
 import { surfacePrice } from '../utils/pricing'
+import { comboCostHistory, rollingZscore } from '../utils/signals'
 
 interface Props {
   sessions: SessionInfo[]
@@ -42,6 +43,12 @@ interface PlaybackTrade {
   status: 'open' | 'closed'
 }
 
+interface SignalPoint {
+  time: string
+  cost: number
+  zscore: number | null
+}
+
 function comboAskCost(combo: SuggestedCombo, snapshot: ChainSnapshot): number {
   return combo.legs.reduce((sum, leg) => {
     return sum + leg.quantity * surfacePrice(snapshot.chain, leg.strike, leg.type, 0, true)
@@ -59,7 +66,7 @@ export default function PlaybackTab({ sessions }: Props) {
   const [snapshots, setSnapshots] = useState<ChainSnapshot[]>([])
   const [loading, setLoading] = useState(false)
   const [params, setParams] = useState<ScanParams>({
-    maxCost: 200,
+    maxCost: 70,
     templateMove: 10,
     minPnl10: 1,
     minPnl: 0,
@@ -72,6 +79,7 @@ export default function PlaybackTab({ sessions }: Props) {
   })
   const [suggestions, setSuggestions] = useState<SuggestedCombo[]>([])
   const [trades, setTrades] = useState<PlaybackTrade[]>([])
+  const [signalHistory, setSignalHistory] = useState<SignalPoint[]>([])
   const timelineRef = useRef<HTMLDivElement>(null)
 
   const pb = usePlayback(snapshots)
@@ -110,6 +118,19 @@ export default function PlaybackTab({ sessions }: Props) {
       }
     }))
   }, [pb.index, params, snapshots])
+
+  // Compute combo cost z-score signals for the top suggestion
+  useEffect(() => {
+    const top = suggestions[0]
+    if (!top || snapshots.length < 5) {
+      setSignalHistory([])
+      return
+    }
+    const history = comboCostHistory(top.legs, snapshots)
+    const lookback = Math.max(5, Math.min(15, Math.floor(snapshots.length / 3)))
+    const zscores = rollingZscore(history.map(h => h.cost), lookback)
+    setSignalHistory(history.map((h, i) => ({ ...h, zscore: zscores[i] })))
+  }, [suggestions[0], snapshots])
 
   // Auto-close open trades when playback reaches end
   useEffect(() => {
@@ -168,6 +189,11 @@ export default function PlaybackTab({ sessions }: Props) {
   const spotChange = snapshot ? snapshot.spot - baseSpot : 0
   const spotChangePct = baseSpot > 0 ? (spotChange / baseSpot * 100) : 0
   
+  const currentSignal = pb.index < signalHistory.length ? signalHistory[pb.index] : null
+  const signalColor = !currentSignal?.zscore ? 'text-ztextdim' :
+    Math.abs(currentSignal.zscore) >= 2 ? 'text-zgreen' :
+    Math.abs(currentSignal.zscore) >= 1 ? 'text-zyellow' : 'text-ztextdim'
+
   const openTrades = trades.filter(t => t.status === 'open')
   const closedTrades = trades.filter(t => t.status === 'closed')
   const totalPnl = closedTrades.reduce((sum, t) => sum + (t.pnl ?? 0), 0) +
@@ -413,6 +439,64 @@ export default function PlaybackTab({ sessions }: Props) {
                     </div>
                   )}
                 </div>
+
+                {/* Signals Panel */}
+                {signalHistory.length > 0 && (
+                  <div className="panel-bg border border-zborder rounded-lg p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <h4 className="text-xs font-medium text-ztextdim tracking-wide">Signals</h4>
+                      <span className={`text-sm font-mono font-semibold ${signalColor}`}>
+                        z={currentSignal?.zscore != null ? currentSignal.zscore.toFixed(2) : '—'}
+                      </span>
+                    </div>
+                    {suggestions[0] && (
+                      <div className="text-[10px] text-ztextdim/60 mb-2 font-mono">
+                        {suggestions[0].legs.map(l => `${l.type === 'call' ? 'C' : 'P'} ${l.strike}×${l.quantity}`).join(' ')}
+                      </div>
+                    )}
+                    <div className="flex items-end h-12 gap-px mb-1">
+                      {signalHistory.map((s, i) => {
+                        if (s.zscore == null) return <div key={i} className="flex-1 h-0.5 bg-ztextdim/10 rounded" />
+                        const h = Math.min(Math.abs(s.zscore) / 3 * 100, 100)
+                        const color = s.zscore > 0
+                          ? (s.zscore >= 2 ? 'bg-zgreen' : s.zscore >= 1 ? 'bg-zgreen/50' : 'bg-ztextdim/30')
+                          : (s.zscore <= -2 ? 'bg-zred' : s.zscore <= -1 ? 'bg-zred/50' : 'bg-ztextdim/30')
+                        const isActive = i === pb.index
+                        return (
+                          <div key={i} className="flex-1 flex flex-col-reverse items-center h-full relative">
+                            <div
+                              className={`w-full ${color} rounded-t transition-all duration-150 ${isActive ? 'ring-1 ring-white' : ''}`}
+                              style={{ height: `${h}%` }}
+                            />
+                            {isActive && (
+                              <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-1 h-1 bg-white rounded-full" />
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                    <div className="flex justify-between text-[9px] text-ztextdim/40">
+                      <span>Entry</span>
+                      <div className="flex gap-3">
+                        <span className="text-zgreen/60">+1σ</span>
+                        <span className="text-zred/60">-1σ</span>
+                        <span className="text-zgreen">+2σ</span>
+                        <span className="text-zred">-2σ</span>
+                      </div>
+                    </div>
+                    <div className="mt-2 flex gap-2 text-[10px]">
+                      {currentSignal?.zscore != null && currentSignal.zscore <= -1 && (
+                        <span className="text-zgreen">⬇ Combo cheap — entry signal</span>
+                      )}
+                      {currentSignal?.zscore != null && currentSignal.zscore >= 1 && (
+                        <span className="text-zred">⬆ Combo expensive — exit signal</span>
+                      )}
+                      {currentSignal?.zscore != null && Math.abs(currentSignal.zscore) < 1 && (
+                        <span className="text-ztextdim/60">Neutral — no signal</span>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {/* Trades Panel */}
                 <div className="panel-bg border border-zborder rounded-lg p-4">

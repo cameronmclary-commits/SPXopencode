@@ -14,9 +14,10 @@ import LivePlayback from './components/LivePlayback'
 import PreMarket from './components/PreMarket'
 import PlaybackTab from './components/PlaybackTab'
 import SurfaceTab from './components/SurfaceTab'
+import MarkoutTab from './components/MarkoutTab'
 import ErrorBoundary from './components/shared/ErrorBoundary'
 
-type Tab = 'overview' | 'chain' | 'scanner' | 'lab' | 'monitoring' | 'historical' | 'premarket' | 'backtest' | 'live' | 'liveanalysis' | 'liveplayback' | 'playback' | 'surface'
+type Tab = 'overview' | 'chain' | 'scanner' | 'lab' | 'monitoring' | 'historical' | 'premarket' | 'backtest' | 'live' | 'liveanalysis' | 'liveplayback' | 'playback' | 'surface' | 'markout'
 
 const tabs: { id: Tab; label: string }[] = [
   { id: 'overview', label: 'Overview' },
@@ -26,6 +27,7 @@ const tabs: { id: Tab; label: string }[] = [
   { id: 'backtest', label: 'Backtest' },
   { id: 'playback', label: 'Playback' },
   { id: 'surface', label: 'Surface' },
+  { id: 'markout', label: 'Markout' },
   { id: 'liveanalysis', label: 'Analysis' },
   { id: 'liveplayback', label: 'Replay' },
   { id: 'live', label: 'Live' },
@@ -159,6 +161,7 @@ export default function App() {
           {tab === 'historical' && <HistoricalTab sessions={sessions} />}
           {tab === 'premarket' && <PreMarket />}
           {tab === 'surface' && <SurfaceTab sessions={sessions} />}
+          {tab === 'markout' && <MarkoutTab sessions={sessions} />}
         </ErrorBoundary>
       </main>
     </div>
