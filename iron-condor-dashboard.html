@@ -144,7 +144,7 @@
 
   <footer>
     Assumptions: 15-pt wings · entries 09:31–15:45 ET · close at 10% of credit remaining ·
-    $0.05/contract slippage on every fill · $100 multiplier. Edit PARAMS near the top of the
+    fills at natural bid/ask · $100 multiplier. Edit PARAMS near the top of the
     script below to change any of these.
   </footer>
 
@@ -154,8 +154,7 @@ const PARAMS = {
   tradeStartTime: '09:31',
   tradeEndTime: '15:45',
   closeAtPctOfCredit: 0.10,
-  dollarMultiplier: 100,
-  slippage: 0.05
+  dollarMultiplier: 100
 }
 
 // ---------- shared backtest engine (mirrors iron-condor-backtest.mjs) ----------
@@ -193,27 +192,27 @@ function buildLegs(center, wing) {
   ]
 }
 
-function legFillPrice(chain, leg, slippage, isOpening) {
+function legFillPrice(chain, leg, isOpening) {
   const isBuy = isOpening ? leg.quantity > 0 : leg.quantity < 0
-  if (isBuy) return surfacePrice(chain, leg.strike, leg.type, true) + slippage
-  return Math.max(0.01, surfacePrice(chain, leg.strike, leg.type, false) - slippage)
+  if (isBuy) return surfacePrice(chain, leg.strike, leg.type, true)           // ask
+  return Math.max(0.01, surfacePrice(chain, leg.strike, leg.type, false))     // bid
 }
 
 // Returns each leg with its fill price attached, so callers can both sum a total
 // and show the per-leg breakdown (used for the trade-detail table).
-function legFills(chain, legs, slippage, isOpening) {
-  return legs.map(l => ({ type: l.type, strike: l.strike, quantity: l.quantity, fill: legFillPrice(chain, l, slippage, isOpening) }))
+function legFills(chain, legs, isOpening) {
+  return legs.map(l => ({ type: l.type, strike: l.strike, quantity: l.quantity, fill: legFillPrice(chain, l, isOpening) }))
 }
 function sumFills(fills) {
   return fills.reduce((s, f) => s + f.quantity * f.fill, 0)
 }
 
-function legsCost(chain, legs, slippage) {
-  return sumFills(legFills(chain, legs, slippage, true))
+function legsCost(chain, legs) {
+  return sumFills(legFills(chain, legs, true))
 }
 
-function legsValue(chain, legs, slippage) {
-  return sumFills(legFills(chain, legs, slippage, false))
+function legsValue(chain, legs) {
+  return sumFills(legFills(chain, legs, false))
 }
 
 async function fetchJSON(path) {
@@ -245,13 +244,13 @@ async function backtestDay(date, params) {
   function openTrade(level, chain, tick, time, spot) {
     tradedLevels.add(level)
     const legs = buildLegs(level, params.wing)
-    const entryFills = legFills(chain, legs, params.slippage, true)
+    const entryFills = legFills(chain, legs, true)
     const cost = sumFills(entryFills)
     openPositions.push({ center: level, legs, entryFills, cost, credit: -cost, entryTick: tick, entryTime: time, entrySpot: spot })
   }
 
   function closePosition(pos, chain, exitTick, time, spot, reason) {
-    const exitFills = legFills(chain, pos.legs, params.slippage, false)
+    const exitFills = legFills(chain, pos.legs, false)
     const exitVal = sumFills(exitFills)
     const pnlPts = exitVal - pos.cost
     dayPnlPts += pnlPts
@@ -292,7 +291,7 @@ async function backtestDay(date, params) {
     for (let i = openPositions.length - 1; i >= 0; i--) {
       const pos = openPositions[i]
       if (tick <= pos.entryTick) continue
-      const costToClose = -legsValue(chain, pos.legs, params.slippage)
+      const costToClose = -legsValue(chain, pos.legs)
       if (costToClose <= pos.credit * params.closeAtPctOfCredit) {
         closePosition(pos, chain, tick, pricePath[tick].time, spot, 'TP')
         openPositions.splice(i, 1)
@@ -303,7 +302,7 @@ async function backtestDay(date, params) {
     }
 
     if (anchor !== null) {
-      const unrealized = openPositions.reduce((s, pos) => s + (legsValue(chain, pos.legs, params.slippage) - pos.cost), 0)
+      const unrealized = openPositions.reduce((s, pos) => s + (legsValue(chain, pos.legs) - pos.cost), 0)
       intraday.push({ tick, time: pricePath[tick].time, pnlPts: dayPnlPts + unrealized })
     }
   }
