@@ -87,7 +87,7 @@ export default function LiveTab({ sessions }: { sessions?: SessionInfo[] }) {
   const [minSideDelta, setMinSideDelta] = useState(0.5)
   const [minBalance, setMinBalance] = useState(0.85)
   const [minGap, setMinGap] = useState(15)
-  const [minSpotGap, setMinSpotGap] = useState(10)
+  const [minSpotGap] = useState(10)
   const [maxStep, setMaxStep] = useState(10)
   const [maxCost, setMaxCost] = useState(20)
   const [tpPoints, setTpPoints] = useState(3)

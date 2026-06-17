@@ -1,8 +1,8 @@
 import { useState, useEffect, useMemo } from 'react'
 import type { SessionInfo, ChainSnapshot } from '../types'
 import { findBestCombo } from '../utils/combos'
-import { comboCostHistory, rollingZscore, comboAskCost, comboBidValue } from '../utils/signals'
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, Legend } from 'recharts'
+import { comboCostHistory, rollingZscore, comboBidValue } from '../utils/signals'
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts'
 
 interface Props {
   sessions: SessionInfo[]
@@ -239,7 +239,7 @@ export default function MarkoutTab({ sessions }: Props) {
                     <YAxis tick={{ fontSize: 10, fill: '#6b7280' }} tickFormatter={v => `$${v.toFixed(1)}`} />
                     <Tooltip
                       contentStyle={{ background: '#1a1a2e', border: '1px solid #2d2d4a', borderRadius: '8px', fontSize: '12px' }}
-                      formatter={(v: number) => [`$${v.toFixed(2)}`, 'Markout']}
+                      formatter={(v: number) => [`$${v.toFixed(2)}`, 'Markout'] as [string, string]}
                     />
                     <ReferenceLine y={0} stroke="#4b5563" strokeDasharray="4 4" />
                     {curves.map(c => (
