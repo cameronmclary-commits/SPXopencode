@@ -58,7 +58,7 @@ export default function LivePlayback() {
   const [maxCost, setMaxCost] = useState(90)
   const [templateMove, setTemplateMove] = useState(10)
   const [minPnl10, setMinPnl10] = useState(1)
-  const [minPnl, setMinPnl] = useState(0.5)
+  const [minPnl, setMinPnl] = useState(1)
   const [minPnlHalf, setMinPnlHalf] = useState(0)
   const [minSideDelta, setMinSideDelta] = useState(0.5)
   const [minBalance, setMinBalance] = useState(0.85)

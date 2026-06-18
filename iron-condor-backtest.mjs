@@ -15,7 +15,7 @@ function fetch(path) {
 }
 
 // Interpolates a raw bid or ask quote for an arbitrary strike from the chain.
-// useAsk=true -> ask quote. useAsk=false -> bid quote. (Direction-aware buy/sell logic lives in legFillPrice below.)
+// useAsk=true -> ask quote. useAsk=false -> bid quote.
 function surfacePrice(chain, strike, type, useAsk) {
   const same = chain.filter(r => r.type === type).sort((a, b) => a.strike - b.strike)
   const getPrice = r => useAsk ? r.ask : r.bid
@@ -40,7 +40,7 @@ function round5(price) {
   return Math.round(price / 5) * 5
 }
 
-// Builds the 4 legs of an at-the-money short straddle with `wing` point wings:
+// Builds the 4 legs of an at-the-money iron condor with `wing` point wings:
 // SELL call @ center, BUY call @ center+wing, SELL put @ center, BUY put @ center-wing
 function buildLegs(center, wing) {
   return [
@@ -51,8 +51,7 @@ function buildLegs(center, wing) {
   ]
 }
 
-// Fill price for one leg's transaction. Whether it's a buy or a sell depends on
-// BOTH the leg's sign (long/short) AND whether we're opening or closing:
+// Fill price for one leg's transaction.
 //   opening a long leg  -> BUY  -> ask
 //   opening a short leg -> SELL -> bid
 //   closing a long leg  -> SELL -> bid
@@ -60,9 +59,9 @@ function buildLegs(center, wing) {
 function legFillPrice(chain, leg, isOpening) {
   const isBuy = isOpening ? leg.quantity > 0 : leg.quantity < 0
   if (isBuy) {
-    return surfacePrice(chain, leg.strike, leg.type, true)   // ask
+    return surfacePrice(chain, leg.strike, leg.type, true)
   }
-  return Math.max(0.01, surfacePrice(chain, leg.strike, leg.type, false)) // bid
+  return Math.max(0.01, surfacePrice(chain, leg.strike, leg.type, false))
 }
 
 // cost = sum(qty * fillPrice) at OPEN -> negative cost == credit received
@@ -75,10 +74,6 @@ function legsValue(chain, legs) {
   return legs.reduce((s, l) => s + l.quantity * legFillPrice(chain, l, false), 0)
 }
 
-// ---- Grid stepping logic ----
-// Anchored to the first entry's center strike. A new trade fires only when price
-// actually reaches a 15-point grid level (anchor + n*wing) that has NEVER been
-// traded that day, regardless of how many already-traded levels it passes on the way.
 function nextGridEntry(prevSpot, currSpot, anchor, wing, tradedLevels) {
   if (prevSpot === currSpot) return null
   const lo = Math.min(prevSpot, currSpot)
@@ -91,8 +86,6 @@ function nextGridEntry(prevSpot, currSpot, anchor, wing, tradedLevels) {
     if (!tradedLevels.has(level)) candidates.push(level)
   }
   if (candidates.length === 0) return null
-  // If price gapped across more than one untraded level in a single tick,
-  // take the one closest to where price ended up (most representative fill).
   candidates.sort((a, b) => Math.abs(a - currSpot) - Math.abs(b - currSpot))
   return candidates[0]
 }
@@ -103,11 +96,11 @@ async function run() {
   console.log(`Running Iron Condor grid-step backtest on ${dates.length} dates...`)
 
   const params = {
-    wing: 15,              // wing width / grid step size
+    wing: 15,
     tradeStartTime: '09:31',
     tradeEndTime: '15:45',
-    closeAtPctOfCredit: 0.10, // close a position once its cost-to-close drops to this fraction of the credit received
-    dollarMultiplier: 100     // SPX option contract multiplier
+    closeAtPctOfCredit: 0.10,
+    dollarMultiplier: 100
   }
 
   let cumPnlPts = 0
@@ -131,13 +124,13 @@ async function run() {
 
     let anchor = null
     const tradedLevels = new Set()
-    const openPositions = [] // { center, legs, cost, credit, entryTick, entryTime, entrySpot }
+    const openPositions = []
 
     let dayPnlPts = 0, dayTrades = 0, dayWins = 0, dayLosses = 0
 
     function closePosition(pos, chain, tickMin, time, reason) {
-      const exitVal = legsValue(chain, pos.legs) // direction-aware fill value of the signed position
-      const pnlPts = exitVal - pos.cost // exit fill value minus entry fill cost
+      const exitVal = legsValue(chain, pos.legs)
+      const pnlPts = exitVal - pos.cost
       cumPnlPts += pnlPts
       dayPnlPts += pnlPts
       totalTrades++; dayTrades++
@@ -158,7 +151,6 @@ async function run() {
 
       if (tickMin < startMin) continue
 
-      // First trade of the day: sets the grid anchor
       if (anchor === null && tickMin >= startMin) {
         anchor = round5(spot)
         tradedLevels.add(anchor)
@@ -179,12 +171,10 @@ async function run() {
         }
       }
 
-      // Check open positions for profit-taking close
       for (let i = openPositions.length - 1; i >= 0; i--) {
         const pos = openPositions[i]
         if (tick <= pos.entryTick) continue
         const costToClose = -legsValue(chain, pos.legs)
-        // costToClose is what it would cost (direction-aware fills) to flatten the position right now; lower is better for us
         if (costToClose <= pos.credit * params.closeAtPctOfCredit) {
           closePosition(pos, chain, tickMin, pricePath[tick].time, 'TP')
           openPositions.splice(i, 1)
@@ -195,7 +185,6 @@ async function run() {
       }
     }
 
-    // Force-close anything still open at the very end of the data
     if (openPositions.length > 0) {
       const finalTick = pricePath.length - 1
       const finalChain = snapshots[finalTick]?.chain || session.openingChain || []

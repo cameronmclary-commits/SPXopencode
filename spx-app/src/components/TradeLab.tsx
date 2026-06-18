@@ -24,7 +24,7 @@ export default function TradeLab({ selectedDate }: Props) {
   const [tick, setTick] = useState(0)
   const [speed, setSpeed] = useState(1)
   const [params, setParams] = useState({
-    maxCost: 50, templateMove: 10, minPnl10: 1, minPnl: 0, minPnlHalf: 0.4, minSideDelta: 0.5, minBalance: 0.85, minGap: 15, minSpotGap: 10, maxStep: 10,
+    maxCost: 50, templateMove: 10, minPnl10: 1, minPnl: 1, minPnlHalf: 0.4, minSideDelta: 0.5, minBalance: 0.85, minGap: 15, minSpotGap: 10, maxStep: 10,
     tpPoints: 1, slPoints: 2, scanInterval: 5,
   })
   const [trades, setTrades] = useState<ForwardTrade[]>([])

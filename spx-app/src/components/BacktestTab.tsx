@@ -161,7 +161,7 @@ function computeMaxDrawdown(equity: number[]): number {
 
 export default function BacktestTab({ sessions }: { sessions: { date: string; id: string }[] }) {
   const [params, setParams] = useState<Params>({
-    maxCost: 50, scanInterval: 5, tpPoints: 1, slPoints: 2, templateMove: 10, minPnl10: 1, minPnl: 0, minPnlHalf: 0.4, minSideDelta: 0.5, minBalance: 0.85, minGap: 15, minSpotGap: 10, maxStep: 10,
+    maxCost: 50, scanInterval: 5, tpPoints: 1, slPoints: 2, templateMove: 10, minPnl10: 1, minPnl: 1, minPnlHalf: 0.4, minSideDelta: 0.5, minBalance: 0.85, minGap: 15, minSpotGap: 10, maxStep: 10,
   })
   const [mode, setMode] = useState<'range' | 'pick'>('range')
   const [selectedDates, setSelectedDates] = useState<Set<string>>(new Set())
