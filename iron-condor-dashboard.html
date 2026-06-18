@@ -82,6 +82,19 @@
   .legs-table th { color: var(--text-dim); text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
   .net-tag { color: var(--teal); font-size: 10px; }
 
+  .book-panel { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+  .book-cell { background: var(--bg); border: 1px solid var(--panel-border); border-radius: 8px; padding: 12px 14px; }
+  .book-label { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); margin-bottom: 6px; font-family: 'IBM Plex Mono', monospace; }
+  .book-value { font-family: 'IBM Plex Mono', monospace; font-size: 18px; font-weight: 600; color: var(--text); }
+  .book-value.pos { color: var(--amber); }
+  .book-value.neg { color: var(--rose); }
+  .book-value.dim { color: var(--text-dim); }
+  .book-pos-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .book-pos-chip { font-family: 'IBM Plex Mono', monospace; font-size: 11px; background: var(--bg); border: 1px solid var(--panel-border); border-radius: 5px; padding: 3px 8px; color: var(--text-dim); }
+  .book-pos-chip .pos-center { color: var(--teal); }
+  .book-pos-chip .pos-neg { color: var(--rose); }
+  .book-pos-chip .pos-pos { color: var(--amber); }
+
   footer { color: var(--text-dim); font-size: 12px; font-family: 'IBM Plex Mono', monospace; line-height: 1.7; }
 </style>
 </head>
@@ -148,246 +161,45 @@
     </table>
   </div>
 
+  <div class="panel">
+    <div class="panel-header">
+      <div class="panel-title">Live Book</div>
+      <div class="panel-date" id="bookDate">—</div>
+    </div>
+    <div class="book-panel">
+      <div class="book-cell"><div class="book-label">Open Positions</div><div class="book-value dim" id="bookOpenCount">—</div></div>
+      <div class="book-cell"><div class="book-label">Credit at Risk</div><div class="book-value" id="bookCreditAtRisk">—</div></div>
+      <div class="book-cell"><div class="book-label">Cost to Close</div><div class="book-value neg" id="bookCostToClose">—</div></div>
+      <div class="book-cell"><div class="book-label">Realized (NET)</div><div class="book-value" id="bookRealized">—</div></div>
+      <div class="book-cell"><div class="book-label">MTM P&amp;L</div><div class="book-value" id="bookMtm">—</div></div>
+    </div>
+    <div class="book-pos-row" id="bookPositions"></div>
+    <div class="panel-hint" style="margin-top:10px">Hover any point on the Grid Tape above to snapshot this panel at that tick. Empty = before trading hours or after EOD flatten.</div>
+  </div>
+
   <footer>
-    Assumptions: 15-pt wings · entries 09:31–15:45 ET · close at 10% of credit remaining ·
-    $0.05/contract slippage on every fill (ask to buy, bid to sell) · $100 multiplier.
-    When a new structure's leg exactly offsets an older still-open structure's leg at the same
-    strike, it's treated as a real closing trade on that older leg (realized immediately) rather
-    than a fresh credit — shown as reason "NET" and tagged in the expanded leg detail. Edit
-    PARAMS near the top of the script below to change any of these.
+    Strategy &amp; engine live in <code>iron-condor-engine.js</code> (shared with the Node CLI
+    <code>iron-condor-dashboard.mjs</code>). Assumptions: 15-pt wings · entries 09:31–15:45 ET ·
+    no profit-taking (positions roll until EOD) · $0.05/contract slippage on every fill
+    (ask to buy, bid to sell) · $100 multiplier. When a new structure's leg exactly offsets
+    an older still-open structure's leg at the same strike, it's treated as a real closing
+    trade on that older leg (realized immediately) rather than a fresh credit — shown as
+    reason "NET" and tagged in the expanded leg detail. P&amp;L is only fully reconciled at
+    EOD when the entire book is flattened. Edit PARAMS below to change any of these.
   </footer>
 
-<script>
-const PARAMS = {
-  wing: 15,
-  tradeStartTime: '09:31',
-  tradeEndTime: '15:45',
-  closeAtPctOfCredit: 0.10,
-  dollarMultiplier: 100,
-  slippage: 0.05
-}
+<script type="module">
+import { PARAMS as DEFAULT_PARAMS, backtestDay, aggregateStats } from './iron-condor-engine.js'
 
-// ---------- shared backtest engine (mirrors iron-condor-backtest.mjs) ----------
+// Override PARAMS here to change strategy defaults without touching the engine.
+const PARAMS = { ...DEFAULT_PARAMS }
 
-function timeToMinutes(t) {
-  const [h, m] = t.split(':').map(Number)
-  return h * 60 + m
-}
-
-function round5(price) {
-  return Math.round(price / 5) * 5
-}
-
-function surfacePrice(chain, strike, type, useAsk) {
-  const same = chain.filter(r => r.type === type).sort((a, b) => a.strike - b.strike)
-  const getPrice = r => useAsk ? r.ask : r.bid
-  if (same.length === 0) return 0.01
-  if (strike <= same[0].strike) return Math.max(0.01, getPrice(same[0]))
-  if (strike >= same[same.length - 1].strike) return Math.max(0.01, getPrice(same[same.length - 1]))
-  let lo = 0, hi = same.length - 1
-  while (hi - lo > 1) {
-    const m = Math.floor((lo + hi) / 2)
-    if (same[m].strike < strike) lo = m; else hi = m
-  }
-  const t = (strike - same[lo].strike) / (same[hi].strike - same[lo].strike)
-  return getPrice(same[lo]) + t * (getPrice(same[hi]) - getPrice(same[lo]))
-}
-
-function buildLegs(center, wing) {
-  return [
-    { strike: center, type: 'call', quantity: -1 },
-    { strike: center + wing, type: 'call', quantity: 1 },
-    { strike: center, type: 'put', quantity: -1 },
-    { strike: center - wing, type: 'put', quantity: 1 }
-  ]
-}
-
-function legFillPrice(chain, leg, slippage, isOpening) {
-  const isBuy = isOpening ? leg.quantity > 0 : leg.quantity < 0
-  if (isBuy) return surfacePrice(chain, leg.strike, leg.type, true) + slippage
-  return Math.max(0.01, surfacePrice(chain, leg.strike, leg.type, false) - slippage)
-}
-
-// Returns each leg with its fill price attached, so callers can both sum a total
-// and show the per-leg breakdown (used for the trade-detail table).
-function legFills(chain, legs, slippage, isOpening) {
-  return legs.map(l => ({ type: l.type, strike: l.strike, quantity: l.quantity, fill: legFillPrice(chain, l, slippage, isOpening) }))
-}
-function sumFills(fills) {
-  return fills.reduce((s, f) => s + f.quantity * f.fill, 0)
-}
-
-function legsCost(chain, legs, slippage) {
-  return sumFills(legFills(chain, legs, slippage, true))
-}
-
-function legsValue(chain, legs, slippage) {
-  return sumFills(legFills(chain, legs, slippage, false))
-}
-
+// Tiny fetchJSON wrapper around the browser fetch — passed into the engine so
+// the engine itself stays environment-agnostic.
 async function fetchJSON(path) {
   const res = await fetch(path)
   if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`)
   return res.json()
-}
-
-async function backtestDay(date, params) {
-  const [session, snapRes] = await Promise.all([
-    fetchJSON(`/api/sessions/${date}`),
-    fetchJSON(`/api/sessions/${date}/snapshots`).catch(() => ({ snapshots: [] }))
-  ])
-  const snapshots = snapRes.snapshots || []
-  const pricePath = session.pricePath
-  if (!pricePath || !pricePath.length) return null
-
-  const startMin = timeToMinutes(params.tradeStartTime)
-  const endMin = timeToMinutes(params.tradeEndTime)
-
-  let anchor = null
-  const tradedLevels = new Set()
-  const openPositions = []
-  const ledger = new Map() // key "strike:type" -> { qty, costBasis, ownerPos } — the single real position the broker would net to
-  const trades = []
-  const ghostEvents = []
-  const intraday = []
-  let dayPnlPts = 0
-
-  function finalizeTrade(pos, exitTick, time, spot, reason) {
-    trades.push({
-      center: pos.center, entryTick: pos.entryTick, entryTime: pos.entryTime, entrySpot: pos.entrySpot,
-      exitTick, exitTime: time, exitSpot: spot, credit: pos.credit, reason,
-      pnlPts: pos.finalPnlPts, legs: pos.finalLegs, earlyClosedLegs: pos.earlyClosedLegs
-    })
-  }
-
-  // Opens a new structure's 4 conceptual legs against the shared ledger. Any leg that exactly
-  // offsets an existing OPEN leg from an older still-open structure is a real closing trade on
-  // that older structure (realized right now, ask-to-buy/bid-to-sell) — not a fresh credit for
-  // this new structure, because at the broker those two orders are the same contract netting flat.
-  function openTrade(level, chain, tick, time, spot) {
-    tradedLevels.add(level)
-    const allLegs = buildLegs(level, params.wing)
-    const pos = {
-      center: level, legs: [], entryFills: [], cost: 0, credit: 0,
-      partialRealizedPnl: 0, earlyClosedLegs: [],
-      entryTick: tick, entryTime: time, entrySpot: spot
-    }
-
-    for (const leg of allLegs) {
-      const key = `${leg.strike}:${leg.type}`
-      const existing = ledger.get(key)
-      if (existing && existing.qty * leg.quantity < 0) {
-        // exact offset against an older structure's still-open leg: close it now, realize P&L now
-        const closeFill = legFillPrice(chain, { strike: leg.strike, type: leg.type, quantity: existing.qty }, params.slippage, false)
-        const legPnl = existing.qty > 0 ? (closeFill - existing.costBasis) : (existing.costBasis - closeFill)
-        const olderPos = existing.ownerPos
-        olderPos.partialRealizedPnl += legPnl
-        olderPos.earlyClosedLegs.push({ type: leg.type, strike: leg.strike, quantity: existing.qty, entryFill: existing.costBasis, exitFill: closeFill, legPnl })
-        olderPos.cost -= existing.qty * existing.costBasis
-        olderPos.legs = olderPos.legs.filter(l => !(l.strike === leg.strike && l.type === leg.type))
-        ledger.delete(key)
-        if (olderPos.legs.length === 0) {
-          // older structure has nothing left open — fully realized already, finalize it now
-          olderPos.finalPnlPts = olderPos.partialRealizedPnl
-          olderPos.finalLegs = []
-          dayPnlPts += olderPos.partialRealizedPnl
-          finalizeTrade(olderPos, tick, time, spot, 'NET')
-          const idx = openPositions.indexOf(olderPos)
-          if (idx >= 0) openPositions.splice(idx, 1)
-        }
-        // this new structure gets no fresh leg here — net result was already flat, no new credit
-      } else {
-        const fill = legFillPrice(chain, leg, params.slippage, true)
-        pos.legs.push(leg)
-        pos.entryFills.push({ type: leg.type, strike: leg.strike, quantity: leg.quantity, fill })
-        pos.cost += leg.quantity * fill
-        ledger.set(key, { qty: leg.quantity, costBasis: fill, ownerPos: pos })
-      }
-    }
-
-    pos.credit = -pos.cost
-    if (pos.legs.length > 0) {
-      openPositions.push(pos)
-    } else {
-      // every leg of this brand new structure was immediately absorbed netting older neighbors
-      pos.finalPnlPts = pos.partialRealizedPnl
-      pos.finalLegs = []
-      dayPnlPts += pos.partialRealizedPnl
-      finalizeTrade(pos, tick, time, spot, 'NET')
-    }
-  }
-
-  function closeRemainingLegs(pos, chain, exitTick, time, spot, reason) {
-    const exitFills = pos.legs.map(l => ({
-      type: l.type, strike: l.strike, quantity: l.quantity,
-      fill: legFillPrice(chain, l, params.slippage, false)
-    }))
-    const exitVal = sumFills(exitFills)
-    const pnlPts = (exitVal - pos.cost) + pos.partialRealizedPnl
-    dayPnlPts += pnlPts
-    pos.finalPnlPts = pnlPts
-    pos.finalLegs = pos.legs.map((l, i) => {
-      const ef = pos.entryFills.find(f => f.strike === l.strike && f.type === l.type)
-      return { type: l.type, strike: l.strike, quantity: l.quantity, entryFill: ef.fill, exitFill: exitFills[i].fill }
-    })
-    pos.legs.forEach(l => ledger.delete(`${l.strike}:${l.type}`))
-    finalizeTrade(pos, exitTick, time, spot, reason)
-  }
-
-  for (let tick = 0; tick < pricePath.length; tick++) {
-    const spot = pricePath[tick].price
-    const tickMin = timeToMinutes(pricePath[tick].time)
-    const chain = snapshots[tick] && snapshots[tick].chain || session.openingChain || []
-    const prevSpot = tick > 0 ? pricePath[tick - 1].price : spot
-
-    if (tickMin < startMin) continue
-
-    if (anchor === null) {
-      anchor = round5(spot)
-      openTrade(anchor, chain, tick, pricePath[tick].time, spot)
-    } else if (tickMin <= endMin && prevSpot !== spot) {
-      const lo = Math.min(prevSpot, spot), hi = Math.max(prevSpot, spot)
-      const firstN = Math.ceil((lo - anchor) / params.wing)
-      const lastN = Math.floor((hi - anchor) / params.wing)
-      const untraded = []
-      for (let n = firstN; n <= lastN; n++) {
-        const level = anchor + n * params.wing
-        if (tradedLevels.has(level)) ghostEvents.push({ tick, time: pricePath[tick].time, level })
-        else untraded.push(level)
-      }
-      if (untraded.length) {
-        untraded.sort((a, b) => Math.abs(a - spot) - Math.abs(b - spot))
-        openTrade(untraded[0], chain, tick, pricePath[tick].time, spot)
-      }
-    }
-
-    for (let i = openPositions.length - 1; i >= 0; i--) {
-      const pos = openPositions[i]
-      if (tick <= pos.entryTick) continue
-      const costToClose = -legsValue(chain, pos.legs, params.slippage)
-      if (costToClose <= pos.credit * params.closeAtPctOfCredit) {
-        closeRemainingLegs(pos, chain, tick, pricePath[tick].time, spot, 'TP')
-        openPositions.splice(i, 1)
-      } else if (tickMin >= endMin) {
-        closeRemainingLegs(pos, chain, tick, pricePath[tick].time, spot, 'EOD')
-        openPositions.splice(i, 1)
-      }
-    }
-
-    if (anchor !== null) {
-      const unrealized = openPositions.reduce((s, pos) => s + (legsValue(chain, pos.legs, params.slippage) - pos.cost + pos.partialRealizedPnl), 0)
-      intraday.push({ tick, time: pricePath[tick].time, pnlPts: dayPnlPts + unrealized })
-    }
-  }
-
-  if (openPositions.length) {
-    const finalTick = pricePath.length - 1
-    const finalChain = (snapshots[finalTick] && snapshots[finalTick].chain) || session.openingChain || []
-    const finalSpot = pricePath[finalTick].price
-    for (const pos of openPositions.slice()) closeRemainingLegs(pos, finalChain, finalTick, pricePath[finalTick].time, finalSpot, 'EOS')
-  }
-
-  return { date, pricePath, anchor, trades, ghostEvents, intraday, dayPnlPts }
 }
 
 // ---------- rendering ----------
@@ -463,6 +275,69 @@ function renderGridTape(day) {
   }
 
   svg.innerHTML = `${gridLines}<polyline points="${pathPoints}" class="price-line" />${ghosts}${markers}`
+
+  // Wire up book panel hover: moving the mouse across the tape updates the
+  // Live Book panel to the snapshot at the nearest tick.
+  svg.onmousemove = (ev) => {
+    const rect = svg.getBoundingClientRect()
+    const x = (ev.clientX - rect.left) / rect.width * W
+    if (x < padL) return
+    const t = Math.round((x - padL) / innerW * (day.pricePath.length - 1))
+    if (t < 0 || t >= day.bookSnapshots.length) return
+    renderBookPanel(day.bookSnapshots[t])
+  }
+  svg.onmouseleave = () => {
+    const lastSnap = day.bookSnapshots.filter(x => x).pop() || null
+    renderBookPanel(lastSnap)
+  }
+}
+
+function fmtPts(n, withSign = true) {
+  const sign = (n >= 0 && withSign) ? '+' : (n < 0 ? '-' : '')
+  return `${sign}${Math.abs(n).toFixed(2)}`
+}
+
+function renderBookPanel(book) {
+  const openCountEl = document.getElementById('bookOpenCount')
+  const creditEl = document.getElementById('bookCreditAtRisk')
+  const costEl = document.getElementById('bookCostToClose')
+  const realizedEl = document.getElementById('bookRealized')
+  const mtmEl = document.getElementById('bookMtm')
+  const posEl = document.getElementById('bookPositions')
+
+  if (!book) {
+    openCountEl.textContent = '—'
+    creditEl.textContent = '—'
+    costEl.textContent = '—'
+    realizedEl.textContent = '—'
+    mtmEl.textContent = '—'
+    posEl.innerHTML = '<span class="book-pos-chip">no snapshot</span>'
+    return
+  }
+
+  openCountEl.textContent = String(book.openCount)
+  creditEl.textContent = book.totalCreditAtRisk.toFixed(2)
+  creditEl.className = 'book-value ' + (book.totalCreditAtRisk >= 0 ? 'pos' : 'neg')
+  costEl.textContent = book.totalCostToClose.toFixed(2)
+  costEl.className = 'book-value ' + (book.totalCostToClose <= 0 ? 'pos' : 'neg')
+  realizedEl.textContent = fmtPts(book.totalRealized)
+  realizedEl.className = 'book-value ' + (book.totalRealized >= 0 ? 'pos' : 'neg')
+  mtmEl.textContent = fmtPts(book.mtmPnl)
+  mtmEl.className = 'book-value ' + (book.mtmPnl >= 0 ? 'pos' : 'neg')
+
+  if (book.perPosition.length === 0) {
+    posEl.innerHTML = '<span class="book-pos-chip">book flat</span>'
+  } else {
+    posEl.innerHTML = book.perPosition.map(pp => {
+      const uClass = pp.unrealized >= 0 ? 'pos-pos' : 'pos-neg'
+      return `<span class="book-pos-chip">` +
+        `<span class="pos-center">${pp.center}</span> ` +
+        `${pp.openLegs}L ` +
+        `cr ${pp.creditAtRisk.toFixed(1)} ` +
+        `unr <span class="${uClass}">${fmtPts(pp.unrealized)}</span>` +
+        `</span>`
+    }).join('')
+  }
 }
 
 function renderIntradayPnl(day) {
@@ -563,36 +438,24 @@ function selectDay(day) {
   document.getElementById('daySelect').value = day.date
   document.getElementById('tradeTableDate').textContent = day.date
   document.getElementById('intradayPnlDate').textContent = day.date
+  document.getElementById('bookDate').textContent = day.date
   renderGridTape(day)
   renderTradeTable(day)
   renderIntradayPnl(day)
+  // Default the book panel to the last snapshot of the day (EOD/EOS state)
+  const lastSnap = day.bookSnapshots.filter(x => x).pop() || null
+  renderBookPanel(lastSnap)
   document.querySelectorAll('#dayTableBody tr').forEach(r => r.classList.toggle('active', r.dataset.date === day.date))
 }
 
 function renderAll(days) {
-  const allTrades = days.flatMap(d => d.trades.map(t => Object.assign({}, t, { date: d.date })))
-  const totalTrades = allTrades.length
-  const wins = allTrades.filter(t => t.pnlPts > 0)
-  const losses = allTrades.filter(t => t.pnlPts <= 0)
-  const cumPnlPts = allTrades.reduce((s, t) => s + t.pnlPts, 0)
-  const winRate = totalTrades ? wins.length / totalTrades : 0
-  const avgWin = wins.length ? wins.reduce((s, t) => s + t.pnlPts, 0) / wins.length : 0
-  const avgLoss = losses.length ? losses.reduce((s, t) => s + t.pnlPts, 0) / losses.length : 0
-  const pf = losses.length && avgLoss !== 0 ? Math.abs((wins.length * avgWin) / (losses.length * avgLoss)) : 0
+  const stats = aggregateStats(days, PARAMS)
 
-  let peak = 0, cum = 0, maxDD = 0
-  for (const t of allTrades) {
-    cum += t.pnlPts
-    if (cum > peak) peak = cum
-    const dd = peak > 0 ? (peak - cum) / peak : 0
-    if (dd > maxDD) maxDD = dd
-  }
-
-  setStat('statPnl', fmtDollars(cumPnlPts * PARAMS.dollarMultiplier), cumPnlPts >= 0)
-  setStat('statWinRate', (winRate * 100).toFixed(1) + '%')
-  setStat('statTrades', String(totalTrades))
-  setStat('statPF', pf.toFixed(2))
-  setStat('statDD', (maxDD * 100).toFixed(1) + '%')
+  setStat('statPnl', fmtDollars(stats.cumPnlDollars), stats.cumPnlPts >= 0)
+  setStat('statWinRate', (stats.winRate * 100).toFixed(1) + '%')
+  setStat('statTrades', String(stats.totalTrades))
+  setStat('statPF', stats.profitFactor.toFixed(2))
+  setStat('statDD', (stats.maxDrawdown * 100).toFixed(1) + '%')
 
   const daySelect = document.getElementById('daySelect')
   daySelect.innerHTML = days.map(d => `<option value="${d.date}">${d.date}</option>`).join('')
@@ -601,7 +464,7 @@ function renderAll(days) {
     if (day) selectDay(day)
   })
 
-  renderEquityCurve(allTrades)
+  renderEquityCurve(stats.allTrades)
   renderDayTable(days)
   selectDay(days[days.length - 1])
   hideStatus()
@@ -621,7 +484,7 @@ async function main() {
   for (let i = 0; i < dates.length; i++) {
     setStatus(`Backtesting ${dates[i]} (${i + 1}/${dates.length})…`)
     try {
-      const day = await backtestDay(dates[i], PARAMS)
+      const day = await backtestDay(dates[i], PARAMS, fetchJSON)
       if (day) days.push(day)
     } catch (err) {
       console.error('Failed on', dates[i], err)
